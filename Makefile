@@ -1,4 +1,4 @@
-.PHONY: build test test-stress test-all install clean lint
+.PHONY: build test test-stress test-all install clean lint publish
 
 build:
 	cargo build --release
@@ -19,3 +19,7 @@ clean:
 
 lint:
 	cargo clippy
+
+publish:
+	cargo publish -p cidr-optimizer
+	cargo publish -p cidr-optimizer-cli
