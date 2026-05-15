@@ -1,9 +1,26 @@
 # Changelog
 
-## [1.1.0]
+## [1.1.0] - 2026-05-16
+
+### Breaking Changes
+
+- **`--provenance` replaced by `--source-map FILE`** — source-map data is now written to a separate JSON file instead of being embedded in `--format json` output
+- **`--validate` flag removed** — coverage validation is now always-on via the library internal invariant check
+
+### Added
+
+- **Over-coverage ratio target mode** — targets can be specified as `over-coverage=X%` to minimize entries while bounding over-exposition to a percentage
+- **Inline comment support** — parser captures text after `#` on CIDR lines, preserved in source-map output
+
+### Changed
+
+- **Provenance renamed to source-map** — all modules, types, config fields, and CLI flags renamed for clarity
 
 ### Documentation
 
+- Extract library API into dedicated `docs/DEVELOPER_API.md`
+- Document inline comment syntax in input format section
+- Update source-map format documentation
 - Fix review findings in README and ARCHITECTURE
 - Add crates.io install instructions and crate links to README
 
