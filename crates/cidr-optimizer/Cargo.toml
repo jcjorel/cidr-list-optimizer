@@ -1,0 +1,15 @@
+[package]
+name = "cidr-optimizer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ipnet = "2"
+thiserror = "2"
+
+[features]
+stress = []
+
+[dev-dependencies]
+proptest = "1"
+ipnet = "2"

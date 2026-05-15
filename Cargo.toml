@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/cidr-optimizer", "crates/cidr-optimizer-cli"]
+resolver = "2"
