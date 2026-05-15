@@ -23,7 +23,6 @@ fn test_10k_lossy_target_100() {
     let input = generate_spaced_v4(10_000);
     let config = OptimizerConfig {
         ipv4_target: Some(100),
-        max_over_coverage_ratio: None,
         ..Default::default()
     };
 
@@ -41,7 +40,6 @@ fn test_10k_lossy_target_10() {
     let input = generate_spaced_v4(10_000);
     let config = OptimizerConfig {
         ipv4_target: Some(10),
-        max_over_coverage_ratio: None,
         ..Default::default()
     };
 
@@ -60,7 +58,6 @@ fn test_100k_lossy_target_100() {
     let input = generate_spaced_v4(100_000);
     let config = OptimizerConfig {
         ipv4_target: Some(100),
-        max_over_coverage_ratio: None,
         ..Default::default()
     };
 
@@ -79,7 +76,6 @@ fn test_100k_lossy_target_10() {
     let input = generate_spaced_v4(100_000);
     let config = OptimizerConfig {
         ipv4_target: Some(10),
-        max_over_coverage_ratio: None,
         ..Default::default()
     };
 
@@ -98,7 +94,6 @@ fn test_1m_lossy_target_100() {
     let input = generate_spaced_v4(1_000_000);
     let config = OptimizerConfig {
         ipv4_target: Some(100),
-        max_over_coverage_ratio: None,
         ..Default::default()
     };
 
@@ -117,7 +112,6 @@ fn test_1m_lossy_target_10() {
     let input = generate_spaced_v4(1_000_000);
     let config = OptimizerConfig {
         ipv4_target: Some(10),
-        max_over_coverage_ratio: None,
         ..Default::default()
     };
 
