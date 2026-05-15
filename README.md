@@ -8,13 +8,13 @@ AWS networking services impose hard limits on allow-list entries (Security Group
 
 ## Features
 
-- Lossless CIDR aggregation
-- Budget-constrained lossy optimization with minimal over-exposition
-- Per-address-family independent targets
-- Source-map tracking
-- Over-coverage percentage cap
-- AWS-native output formats
-- Deterministic output
+- **Lossless aggregation** — merges adjacent/overlapping CIDRs into the minimal equivalent set with zero over-exposition
+- **Budget-constrained optimization** — reduces entry count to fit AWS limits while minimizing additional IPs allowed
+- **Bounded over-coverage** — caps the percentage of extra addresses introduced so you never open more than you accept
+- **Independent IPv4/IPv6 targets** — set separate entry budgets for IPv4 and IPv6 ranges (e.g., optimize IPv4 down to 50 entries while leaving IPv6 as-is) because real-world lists like the AWS IP ranges are overwhelmingly IPv4
+- **Source-map tracking** — traces every output CIDR back to its original inputs for audit and compliance review
+- **AWS-native output** — emits JSON ready for Security Groups, Prefix Lists, and WAF IP Sets with no post-processing
+- **Deterministic output** — same input always produces the same result, safe for CI/CD diffing and GitOps workflows
 
 ## Installation
 
