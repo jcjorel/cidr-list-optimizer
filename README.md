@@ -19,6 +19,9 @@ AWS networking services impose hard limits on allow-list entries (Security Group
 ## Installation
 
 ```bash
+# From crates.io
+cargo install cidr-optimizer-cli
+
 # From source
 cargo install --path crates/cidr-optimizer-cli
 
@@ -27,6 +30,8 @@ cargo build --release
 ```
 
 **Requirements**: Rust 1.93+ (edition 2021)
+
+**Crates**: [cidr-optimizer](https://crates.io/crates/cidr-optimizer) (library) · [cidr-optimizer-cli](https://crates.io/crates/cidr-optimizer-cli) (binary)
 
 ## Quick Start
 
