@@ -1,5 +1,6 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process;
 
 use anyhow::Result;
@@ -44,9 +45,9 @@ struct Cli {
     #[arg(long, value_enum, default_value = "plain")]
     format: OutputFormat,
 
-    /// Show provenance
-    #[arg(long)]
-    provenance: bool,
+    /// Write source-map JSON to FILE
+    #[arg(long, value_name = "FILE")]
+    source_map: Option<PathBuf>,
 
     /// Show statistics on stderr
     #[arg(long)]
@@ -76,8 +77,6 @@ struct JsonOutput {
 struct JsonEntry {
     prefix: String,
     source_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sources: Option<Vec<String>>,
     over_coverage: u128,
 }
 
@@ -101,6 +100,26 @@ struct AwsEntry {
     cidr: String,
 }
 
+#[derive(Serialize)]
+struct SourceMapOutput {
+    entries: Vec<SourceMapEntry>,
+    stats: JsonStats,
+}
+
+#[derive(Serialize)]
+struct SourceMapEntry {
+    prefix: String,
+    sources: Vec<SourceMapSource>,
+    over_coverage: u128,
+}
+
+#[derive(Serialize)]
+struct SourceMapSource {
+    index: usize,
+    cidr: String,
+    comment: Option<String>,
+}
+
 fn parse_target_spec(s: &str) -> Result<TargetSpec> {
     if let Some(rest) = s.strip_prefix("over-coverage=") {
         let rest = rest.strip_suffix('%')
@@ -112,6 +131,16 @@ fn parse_target_spec(s: &str) -> Result<TargetSpec> {
         let n: usize = s.parse()
             .map_err(|_| anyhow::anyhow!("invalid target: '{}' (expected integer or over-coverage=X%)", s))?;
         Ok(TargetSpec::EntryCount(n))
+    }
+}
+
+fn build_json_entry(
+    e: &cidr_optimizer::AggregatedEntry,
+) -> JsonEntry {
+    JsonEntry {
+        prefix: e.prefix.to_string(),
+        source_count: e.source_indices.as_ref().map_or(0, |s| s.len()),
+        over_coverage: e.over_coverage,
     }
 }
 
@@ -147,11 +176,11 @@ fn main() -> Result<()> {
         max_prefix_len_v4: cli.max_prefix_len_v4,
         max_prefix_len_v6: cli.max_prefix_len_v6,
         max_input_entries: cli.max_input_entries,
-        provenance: cli.provenance,
+        source_map: cli.source_map.is_some(),
     };
 
     // For --validate, we need the original parsed prefixes
-    let result = if cli.validate {
+    let (result, input_metadata) = if cli.validate {
         let reader: Box<dyn BufRead> = if cli.input == "-" {
             Box::new(BufReader::new(io::stdin()))
         } else {
@@ -159,7 +188,7 @@ fn main() -> Result<()> {
         };
 
         // Parse input first to retain original prefixes for validation
-        let parsed = cidr_optimizer::parser::parse_input(reader, config.provenance, config.max_input_entries)?;
+        let parsed = cidr_optimizer::parser::parse_input(reader, config.source_map, config.max_input_entries)?;
         let prefixes: Vec<ipnet::IpNet> = parsed
             .ipv4.iter().map(|(_, p)| ipnet::IpNet::V4(*p))
             .chain(parsed.ipv6.iter().map(|(_, p)| ipnet::IpNet::V6(*p)))
@@ -174,14 +203,15 @@ fn main() -> Result<()> {
         }
         eprintln!("Validation passed: all inputs covered");
 
-        opt_result
+        (opt_result, parsed.input_metadata)
     } else {
         let reader: Box<dyn BufRead> = if cli.input == "-" {
             Box::new(BufReader::new(io::stdin()))
         } else {
             Box::new(BufReader::new(File::open(&cli.input)?))
         };
-        optimize_from_reader(reader, &config)?
+        let reader_result = optimize_from_reader(reader, &config)?;
+        (reader_result.result, reader_result.input_metadata)
     };
 
     // Fail hard if EntryCount target was not met (not for MaxOverCoverage)
@@ -248,33 +278,11 @@ fn main() -> Result<()> {
             let json_output = JsonOutput {
                 ipv4: result.entries.iter()
                     .filter(|e| matches!(e.prefix, ipnet::IpNet::V4(_)))
-                    .map(|e| JsonEntry {
-                        prefix: e.prefix.to_string(),
-                        source_count: e.source_indices.as_ref().map_or(0, |s| s.len()),
-                        sources: if cli.provenance {
-                            e.source_indices.as_ref().map(|indices| {
-                                indices.iter().map(|i| format!("index:{}", i)).collect()
-                            })
-                        } else {
-                            None
-                        },
-                        over_coverage: e.over_coverage,
-                    })
+                    .map(build_json_entry)
                     .collect(),
                 ipv6: result.entries.iter()
                     .filter(|e| matches!(e.prefix, ipnet::IpNet::V6(_)))
-                    .map(|e| JsonEntry {
-                        prefix: e.prefix.to_string(),
-                        source_count: e.source_indices.as_ref().map_or(0, |s| s.len()),
-                        sources: if cli.provenance {
-                            e.source_indices.as_ref().map(|indices| {
-                                indices.iter().map(|i| format!("index:{}", i)).collect()
-                            })
-                        } else {
-                            None
-                        },
-                        over_coverage: e.over_coverage,
-                    })
+                    .map(build_json_entry)
                     .collect(),
                 stats: JsonStats {
                     input_ipv4_count: result.stats.input_ipv4_count,
@@ -297,6 +305,49 @@ fn main() -> Result<()> {
                 .collect();
             println!("{}", serde_json::to_string_pretty(&aws_entries)?);
         }
+    }
+
+    // Write source-map file if requested
+    if let Some(ref path) = cli.source_map {
+        let sm_entries: Vec<SourceMapEntry> = result.entries.iter().map(|e| {
+            let sources = e.source_indices.as_ref().map_or_else(Vec::new, |indices| {
+                indices.iter().map(|&i| {
+                    if i < input_metadata.len() {
+                        let meta = &input_metadata[i];
+                        SourceMapSource { index: i, cidr: meta.original.clone(), comment: meta.comment.clone() }
+                    } else {
+                        SourceMapSource { index: i, cidr: format!("index:{}", i), comment: None }
+                    }
+                }).collect()
+            });
+            SourceMapEntry {
+                prefix: e.prefix.to_string(),
+                sources,
+                over_coverage: e.over_coverage,
+            }
+        }).collect();
+
+        let sm_output = SourceMapOutput {
+            entries: sm_entries,
+            stats: JsonStats {
+                input_ipv4_count: result.stats.input_ipv4_count,
+                input_ipv6_count: result.stats.input_ipv6_count,
+                output_ipv4_count: result.stats.output_ipv4_count,
+                output_ipv6_count: result.stats.output_ipv6_count,
+                total_ipv4_over_coverage: result.stats.total_ipv4_over_coverage,
+                total_ipv6_over_coverage: result.stats.total_ipv6_over_coverage,
+                ipv4_compression_ratio: result.stats.ipv4_compression_ratio,
+                ipv6_compression_ratio: result.stats.ipv6_compression_ratio,
+                ipv4_target_binding: result.stats.ipv4_target_binding,
+                ipv6_target_binding: result.stats.ipv6_target_binding,
+            },
+        };
+
+        let mut file = File::create(path)
+            .map_err(|e| anyhow::anyhow!("cannot create source-map file '{}': {}", path.display(), e))?;
+        let json = serde_json::to_string_pretty(&sm_output)?;
+        file.write_all(json.as_bytes())?;
+        file.write_all(b"\n")?;
     }
 
     Ok(())

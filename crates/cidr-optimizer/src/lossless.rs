@@ -1,9 +1,9 @@
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-/// A prefix with provenance tracking and coverage information.
+/// A prefix with source-map tracking and coverage information.
 #[derive(Debug, Clone)]
-pub struct ProvenancePrefix<N> {
+pub struct SourceMapPrefix<N> {
     pub prefix: N,
     pub source_indices: Vec<usize>,
     /// Number of IPs actually covered by original inputs within this prefix.
@@ -15,18 +15,18 @@ pub struct ProvenancePrefix<N> {
 pub fn lossless_aggregate_v4(
     input: Vec<(usize, Ipv4Net)>,
     max_prefix_len: u8,
-) -> Vec<ProvenancePrefix<Ipv4Net>> {
+) -> Vec<SourceMapPrefix<Ipv4Net>> {
     if input.is_empty() {
         return Vec::new();
     }
 
-    // Build provenance entries
-    let mut entries: Vec<ProvenancePrefix<Ipv4Net>> = input
+    // Build source-map entries
+    let mut entries: Vec<SourceMapPrefix<Ipv4Net>> = input
         .into_iter()
         .map(|(idx, prefix)| {
             let pl = prefix.prefix_len();
             let cap = if pl == 32 { 1u128 } else { 1u128 << (32 - pl) };
-            ProvenancePrefix {
+            SourceMapPrefix {
                 prefix,
                 source_indices: vec![idx],
                 coverage: cap,
@@ -66,17 +66,17 @@ pub fn lossless_aggregate_v4(
 pub fn lossless_aggregate_v6(
     input: Vec<(usize, Ipv6Net)>,
     max_prefix_len: u8,
-) -> Vec<ProvenancePrefix<Ipv6Net>> {
+) -> Vec<SourceMapPrefix<Ipv6Net>> {
     if input.is_empty() {
         return Vec::new();
     }
 
-    let mut entries: Vec<ProvenancePrefix<Ipv6Net>> = input
+    let mut entries: Vec<SourceMapPrefix<Ipv6Net>> = input
         .into_iter()
         .map(|(idx, prefix)| {
             let pl = prefix.prefix_len();
             let cap = if pl == 128 { 1u128 } else if (128 - pl) >= 128 { u128::MAX } else { 1u128 << (128 - pl) };
-            ProvenancePrefix {
+            SourceMapPrefix {
                 prefix,
                 source_indices: vec![idx],
                 coverage: cap,
@@ -115,13 +115,13 @@ fn trunc_v4(addr: Ipv4Addr, prefix_len: u8) -> Ipv4Addr {
 }
 
 /// Radix sort by (network_address bytes [0..3], prefix_len) — 5 passes LSD.
-fn radix_sort_v4(entries: &mut Vec<ProvenancePrefix<Ipv4Net>>) {
+fn radix_sort_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
     let len = entries.len();
     if len <= 1 {
         return;
     }
     let mut buf = Vec::with_capacity(len);
-    buf.resize_with(len, || ProvenancePrefix {
+    buf.resize_with(len, || SourceMapPrefix {
         prefix: Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap(),
         source_indices: Vec::new(),
         coverage: 0,
@@ -162,7 +162,7 @@ fn radix_sort_v4(entries: &mut Vec<ProvenancePrefix<Ipv4Net>>) {
     for &i in &indices {
         sorted.push(std::mem::replace(
             &mut entries[i],
-            ProvenancePrefix {
+            SourceMapPrefix {
                 prefix: Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap(),
                 source_indices: Vec::new(),
                 coverage: 0,
@@ -175,10 +175,10 @@ fn radix_sort_v4(entries: &mut Vec<ProvenancePrefix<Ipv4Net>>) {
 /// Redundancy elimination using monotone stack.
 /// Input must be sorted by (network_address, prefix_length).
 fn redundancy_eliminate_v4(
-    entries: Vec<ProvenancePrefix<Ipv4Net>>,
-) -> Vec<ProvenancePrefix<Ipv4Net>> {
-    let mut stack: Vec<ProvenancePrefix<Ipv4Net>> = Vec::new();
-    let mut output: Vec<ProvenancePrefix<Ipv4Net>> = Vec::new();
+    entries: Vec<SourceMapPrefix<Ipv4Net>>,
+) -> Vec<SourceMapPrefix<Ipv4Net>> {
+    let mut stack: Vec<SourceMapPrefix<Ipv4Net>> = Vec::new();
+    let mut output: Vec<SourceMapPrefix<Ipv4Net>> = Vec::new();
 
     for entry in entries {
         // Pop entries that don't contain the current entry
@@ -191,7 +191,7 @@ fn redundancy_eliminate_v4(
 
         if let Some(top) = stack.last_mut() {
             if contains_v4(&top.prefix, &entry.prefix) {
-                // Current entry is redundant — merge provenance into container
+                // Current entry is redundant — merge source-map into container
                 top.source_indices.extend(&entry.source_indices);
                 // Coverage doesn't change: container already covers this range
                 continue;
@@ -224,7 +224,7 @@ fn contains_v4(outer: &Ipv4Net, inner: &Ipv4Net) -> bool {
 }
 
 /// Stack-based sibling merging with cascading.
-fn sibling_merge_v4(entries: &mut Vec<ProvenancePrefix<Ipv4Net>>) {
+fn sibling_merge_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
     if entries.len() <= 1 {
         return;
     }
@@ -239,7 +239,7 @@ fn sibling_merge_v4(entries: &mut Vec<ProvenancePrefix<Ipv4Net>>) {
             })
     });
 
-    let mut stack: Vec<ProvenancePrefix<Ipv4Net>> = Vec::new();
+    let mut stack: Vec<SourceMapPrefix<Ipv4Net>> = Vec::new();
 
     for entry in entries.drain(..) {
         stack.push(entry);
@@ -255,7 +255,7 @@ fn sibling_merge_v4(entries: &mut Vec<ProvenancePrefix<Ipv4Net>>) {
                 let merged_coverage = left.coverage.saturating_add(right.coverage);
                 let mut merged_indices = left.source_indices;
                 merged_indices.extend(right.source_indices);
-                stack.push(ProvenancePrefix {
+                stack.push(SourceMapPrefix {
                     prefix: Ipv4Net::new(parent_net, parent_len).unwrap(),
                     source_indices: merged_indices,
                     coverage: merged_coverage,
@@ -293,7 +293,7 @@ fn trunc_v6(addr: Ipv6Addr, prefix_len: u8) -> Ipv6Addr {
     Ipv6Addr::from(bits & mask)
 }
 
-fn radix_sort_v6(entries: &mut Vec<ProvenancePrefix<Ipv6Net>>) {
+fn radix_sort_v6(entries: &mut Vec<SourceMapPrefix<Ipv6Net>>) {
     let len = entries.len();
     if len <= 1 {
         return;
@@ -337,7 +337,7 @@ fn radix_sort_v6(entries: &mut Vec<ProvenancePrefix<Ipv6Net>>) {
     for &i in &indices {
         sorted.push(std::mem::replace(
             &mut entries[i],
-            ProvenancePrefix {
+            SourceMapPrefix {
                 prefix: Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).unwrap(),
                 source_indices: Vec::new(),
                 coverage: 0,
@@ -348,10 +348,10 @@ fn radix_sort_v6(entries: &mut Vec<ProvenancePrefix<Ipv6Net>>) {
 }
 
 fn redundancy_eliminate_v6(
-    entries: Vec<ProvenancePrefix<Ipv6Net>>,
-) -> Vec<ProvenancePrefix<Ipv6Net>> {
-    let mut stack: Vec<ProvenancePrefix<Ipv6Net>> = Vec::new();
-    let mut output: Vec<ProvenancePrefix<Ipv6Net>> = Vec::new();
+    entries: Vec<SourceMapPrefix<Ipv6Net>>,
+) -> Vec<SourceMapPrefix<Ipv6Net>> {
+    let mut stack: Vec<SourceMapPrefix<Ipv6Net>> = Vec::new();
+    let mut output: Vec<SourceMapPrefix<Ipv6Net>> = Vec::new();
 
     for entry in entries {
         while let Some(top) = stack.last() {
@@ -393,7 +393,7 @@ fn contains_v6(outer: &Ipv6Net, inner: &Ipv6Net) -> bool {
     (outer_bits & mask) == (inner_bits & mask)
 }
 
-fn sibling_merge_v6(entries: &mut Vec<ProvenancePrefix<Ipv6Net>>) {
+fn sibling_merge_v6(entries: &mut Vec<SourceMapPrefix<Ipv6Net>>) {
     if entries.len() <= 1 {
         return;
     }
@@ -407,7 +407,7 @@ fn sibling_merge_v6(entries: &mut Vec<ProvenancePrefix<Ipv6Net>>) {
             })
     });
 
-    let mut stack: Vec<ProvenancePrefix<Ipv6Net>> = Vec::new();
+    let mut stack: Vec<SourceMapPrefix<Ipv6Net>> = Vec::new();
 
     for entry in entries.drain(..) {
         stack.push(entry);
@@ -422,7 +422,7 @@ fn sibling_merge_v6(entries: &mut Vec<ProvenancePrefix<Ipv6Net>>) {
                 let merged_coverage = left.coverage.saturating_add(right.coverage);
                 let mut merged_indices = left.source_indices;
                 merged_indices.extend(right.source_indices);
-                stack.push(ProvenancePrefix {
+                stack.push(SourceMapPrefix {
                     prefix: Ipv6Net::new(parent_net, parent_len).unwrap(),
                     source_indices: merged_indices,
                     coverage: merged_coverage,
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn provenance_through_merges() {
+    fn source_map_through_merges() {
         let input = vec![
             (0, "10.0.0.0/25".parse().unwrap()),
             (1, "10.0.0.128/25".parse().unwrap()),

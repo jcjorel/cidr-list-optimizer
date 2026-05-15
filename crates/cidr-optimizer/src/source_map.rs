@@ -1,9 +1,9 @@
-//! Binary-search provenance mapping from output prefixes back to original input indices.
+//! Binary-search source-map mapping from output prefixes back to original input indices.
 
 use ipnet::{Ipv4Net, Ipv6Net};
 
 /// For each output prefix, find all input prefixes it contains via binary search.
-pub fn compute_provenance_v4(
+pub fn compute_source_map_v4(
     output: &[Ipv4Net],
     sorted_input: &[(usize, Ipv4Net)],
 ) -> Vec<Vec<usize>> {
@@ -26,7 +26,7 @@ pub fn compute_provenance_v4(
 }
 
 /// For each output prefix, find all input prefixes it contains via binary search.
-pub fn compute_provenance_v6(
+pub fn compute_source_map_v6(
     output: &[Ipv6Net],
     sorted_input: &[(usize, Ipv6Net)],
 ) -> Vec<Vec<usize>> {
@@ -78,18 +78,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provenance_v4_basic() {
+    fn source_map_v4_basic() {
         let output: Vec<Ipv4Net> = vec!["10.0.0.0/23".parse().unwrap()];
         let input: Vec<(usize, Ipv4Net)> = vec![
             (0, "10.0.0.0/24".parse().unwrap()),
             (1, "10.0.1.0/24".parse().unwrap()),
         ];
-        let result = compute_provenance_v4(&output, &input);
+        let result = compute_source_map_v4(&output, &input);
         assert_eq!(result, vec![vec![0, 1]]);
     }
 
     #[test]
-    fn provenance_v4_partial() {
+    fn source_map_v4_partial() {
         let output: Vec<Ipv4Net> = vec![
             "10.0.0.0/24".parse().unwrap(),
             "10.0.1.0/24".parse().unwrap(),
@@ -99,18 +99,18 @@ mod tests {
             (1, "10.0.1.0/24".parse().unwrap()),
             (2, "192.168.0.0/24".parse().unwrap()),
         ];
-        let result = compute_provenance_v4(&output, &input);
+        let result = compute_source_map_v4(&output, &input);
         assert_eq!(result, vec![vec![0], vec![1]]);
     }
 
     #[test]
-    fn provenance_v6_basic() {
+    fn source_map_v6_basic() {
         let output: Vec<Ipv6Net> = vec!["2001:db8::/47".parse().unwrap()];
         let input: Vec<(usize, Ipv6Net)> = vec![
             (0, "2001:db8::/48".parse().unwrap()),
             (1, "2001:db8:1::/48".parse().unwrap()),
         ];
-        let result = compute_provenance_v6(&output, &input);
+        let result = compute_source_map_v6(&output, &input);
         assert_eq!(result, vec![vec![0, 1]]);
     }
 }

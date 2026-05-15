@@ -1,7 +1,7 @@
 use ipnet::{Ipv4Net, Ipv6Net};
 
 use crate::error::OptimizeError;
-use crate::lossless::ProvenancePrefix;
+use crate::lossless::SourceMapPrefix;
 
 pub type NodeIdx = u32;
 pub const INVALID: NodeIdx = u32::MAX;
@@ -179,7 +179,7 @@ impl BinaryTrie {
         (bits, prefix_len)
     }
 
-    pub fn extract_leaves_v4(&self) -> Vec<ProvenancePrefix<Ipv4Net>> {
+    pub fn extract_leaves_v4(&self) -> Vec<SourceMapPrefix<Ipv4Net>> {
         let leaf_indices = self.extract_leaf_indices();
         leaf_indices
             .into_iter()
@@ -187,7 +187,7 @@ impl BinaryTrie {
                 let (bits, prefix_len) = self.node_prefix_bits(idx);
                 let addr_bits = (bits >> 96) as u32;
                 let net = Ipv4Net::new(std::net::Ipv4Addr::from(addr_bits), prefix_len).unwrap();
-                ProvenancePrefix {
+                SourceMapPrefix {
                     prefix: net,
                     source_indices: Vec::new(),
                     coverage: self.arena[idx as usize].coverage,
@@ -196,14 +196,14 @@ impl BinaryTrie {
             .collect()
     }
 
-    pub fn extract_leaves_v6(&self) -> Vec<ProvenancePrefix<Ipv6Net>> {
+    pub fn extract_leaves_v6(&self) -> Vec<SourceMapPrefix<Ipv6Net>> {
         let leaf_indices = self.extract_leaf_indices();
         leaf_indices
             .into_iter()
             .map(|idx| {
                 let (bits, prefix_len) = self.node_prefix_bits(idx);
                 let net = Ipv6Net::new(std::net::Ipv6Addr::from(bits), prefix_len).unwrap();
-                ProvenancePrefix {
+                SourceMapPrefix {
                     prefix: net,
                     source_indices: Vec::new(),
                     coverage: self.arena[idx as usize].coverage,
@@ -212,7 +212,7 @@ impl BinaryTrie {
             .collect()
     }
 
-    pub fn build_from_v4(lossless: &[ProvenancePrefix<Ipv4Net>]) -> Result<Self, OptimizeError> {
+    pub fn build_from_v4(lossless: &[SourceMapPrefix<Ipv4Net>]) -> Result<Self, OptimizeError> {
         let mut trie = Self {
             arena: Vec::new(),
             root: 0,
@@ -233,7 +233,7 @@ impl BinaryTrie {
         Ok(trie)
     }
 
-    pub fn build_from_v6(lossless: &[ProvenancePrefix<Ipv6Net>]) -> Result<Self, OptimizeError> {
+    pub fn build_from_v6(lossless: &[SourceMapPrefix<Ipv6Net>]) -> Result<Self, OptimizeError> {
         let mut trie = Self {
             arena: Vec::new(),
             root: 0,
@@ -434,8 +434,8 @@ mod tests {
     #[test]
     fn build_simple_trie_v4() {
         let entries = vec![
-            ProvenancePrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
-            ProvenancePrefix { prefix: "10.0.1.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.1.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256 },
         ];
         let trie = BinaryTrie::build_from_v4(&entries).unwrap();
         assert_eq!(trie.total_leaf_count(), 2);
@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn capacity_root_v4() {
         let entries = vec![
-            ProvenancePrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
         ];
         let trie = BinaryTrie::build_from_v4(&entries).unwrap();
         assert_eq!(trie.capacity(trie.root), u128::MAX);
@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn capacity_leaf_v4() {
         let entries = vec![
-            ProvenancePrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
         ];
         let trie = BinaryTrie::build_from_v4(&entries).unwrap();
         let leaves = trie.extract_leaf_indices();
@@ -466,8 +466,8 @@ mod tests {
     fn path_compression_reduces_nodes() {
         // Two /32 entries that share a long prefix should use path compression
         let entries = vec![
-            ProvenancePrefix { prefix: "10.0.0.1/32".parse().unwrap(), source_indices: vec![0], coverage: 1 },
-            ProvenancePrefix { prefix: "10.0.0.2/32".parse().unwrap(), source_indices: vec![1], coverage: 1 },
+            SourceMapPrefix { prefix: "10.0.0.1/32".parse().unwrap(), source_indices: vec![0], coverage: 1 },
+            SourceMapPrefix { prefix: "10.0.0.2/32".parse().unwrap(), source_indices: vec![1], coverage: 1 },
         ];
         let trie = BinaryTrie::build_from_v4(&entries).unwrap();
         assert_eq!(trie.total_leaf_count(), 2);
@@ -478,8 +478,8 @@ mod tests {
     #[test]
     fn collapse_and_extract() {
         let entries = vec![
-            ProvenancePrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128 },
-            ProvenancePrefix { prefix: "10.0.0.128/25".parse().unwrap(), source_indices: vec![1], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.0.128/25".parse().unwrap(), source_indices: vec![1], coverage: 128 },
         ];
         let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
         assert_eq!(trie.total_leaf_count(), 2);
@@ -507,8 +507,8 @@ mod tests {
     #[test]
     fn build_v6_trie() {
         let entries = vec![
-            ProvenancePrefix { prefix: "2001:db8::/48".parse().unwrap(), source_indices: vec![0], coverage: 1u128 << 80 },
-            ProvenancePrefix { prefix: "2001:db8:1::/48".parse().unwrap(), source_indices: vec![1], coverage: 1u128 << 80 },
+            SourceMapPrefix { prefix: "2001:db8::/48".parse().unwrap(), source_indices: vec![0], coverage: 1u128 << 80 },
+            SourceMapPrefix { prefix: "2001:db8:1::/48".parse().unwrap(), source_indices: vec![1], coverage: 1u128 << 80 },
         ];
         let trie = BinaryTrie::build_from_v6(&entries).unwrap();
         assert_eq!(trie.total_leaf_count(), 2);

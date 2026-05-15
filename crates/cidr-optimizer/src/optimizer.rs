@@ -166,7 +166,7 @@ pub fn exceeds_ratio(over: u128, covered: u128, max_ratio: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lossless::ProvenancePrefix;
+    use crate::lossless::SourceMapPrefix;
 
     #[test]
     fn efficiency_key_ordering() {
@@ -200,10 +200,10 @@ mod tests {
     #[test]
     fn optimize_small_trie_to_target() {
         let entries = vec![
-            ProvenancePrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128 },
-            ProvenancePrefix { prefix: "10.0.0.128/25".parse().unwrap(), source_indices: vec![1], coverage: 128 },
-            ProvenancePrefix { prefix: "10.0.1.0/25".parse().unwrap(), source_indices: vec![2], coverage: 128 },
-            ProvenancePrefix { prefix: "10.0.1.128/25".parse().unwrap(), source_indices: vec![3], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.0.128/25".parse().unwrap(), source_indices: vec![1], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.1.0/25".parse().unwrap(), source_indices: vec![2], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.1.128/25".parse().unwrap(), source_indices: vec![3], coverage: 128 },
         ];
         let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
         assert_eq!(trie.total_leaf_count(), 4);
@@ -215,8 +215,8 @@ mod tests {
     #[test]
     fn optimize_target_already_met() {
         let entries = vec![
-            ProvenancePrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
-            ProvenancePrefix { prefix: "10.0.1.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.1.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256 },
         ];
         let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
         let _leaves = optimize_trie(&mut trie, 5, None, 512);
@@ -227,10 +227,10 @@ mod tests {
     fn optimize_with_ratio_cap() {
         // 4 /32 entries scattered — collapsing would create huge over-coverage
         let entries = vec![
-            ProvenancePrefix { prefix: "10.0.0.1/32".parse().unwrap(), source_indices: vec![0], coverage: 1 },
-            ProvenancePrefix { prefix: "10.0.0.2/32".parse().unwrap(), source_indices: vec![1], coverage: 1 },
-            ProvenancePrefix { prefix: "192.168.0.1/32".parse().unwrap(), source_indices: vec![2], coverage: 1 },
-            ProvenancePrefix { prefix: "192.168.0.2/32".parse().unwrap(), source_indices: vec![3], coverage: 1 },
+            SourceMapPrefix { prefix: "10.0.0.1/32".parse().unwrap(), source_indices: vec![0], coverage: 1 },
+            SourceMapPrefix { prefix: "10.0.0.2/32".parse().unwrap(), source_indices: vec![1], coverage: 1 },
+            SourceMapPrefix { prefix: "192.168.0.1/32".parse().unwrap(), source_indices: vec![2], coverage: 1 },
+            SourceMapPrefix { prefix: "192.168.0.2/32".parse().unwrap(), source_indices: vec![3], coverage: 1 },
         ];
         let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
         // With very strict ratio (0.0), no merging should happen

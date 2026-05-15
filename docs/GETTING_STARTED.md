@@ -132,7 +132,7 @@ Expected output:
 
 What happened: IPv4 entries merged losslessly into a /22 (4 siblings). IPv6 entries merged losslessly into a /47. Each AF was optimized independently against its own target.
 
-## Scenario 5: Provenance Inspection
+## Scenario 5: Source-Map Inspection
 
 **Goal**: Understand which inputs map to each output prefix.
 
@@ -148,10 +148,10 @@ Create `audit.txt`:
 Run:
 
 ```bash
-cidr-optimizer --ipv4-target 1 --provenance --format json audit.txt
+cidr-optimizer --ipv4-target 1 --source-map /tmp/source-map.json --format json audit.txt
 ```
 
-Expected output (abbreviated):
+Expected stdout output (abbreviated):
 
 ```json
 {
@@ -159,7 +159,6 @@ Expected output (abbreviated):
     {
       "prefix": "10.0.0.0/22",
       "source_count": 4,
-      "sources": ["index:0", "index:1", "index:2", "index:3"],
       "over_coverage": 383
     }
   ],
@@ -168,7 +167,27 @@ Expected output (abbreviated):
 }
 ```
 
-What happened: All 4 inputs were merged into a single /22. The `sources` array shows which input lines (by zero-based index) are covered. Over-coverage of 383 means 383 IPs in the /22 were not in any original input. See [User Guide — Provenance Interpretation](USER_GUIDE.md#provenance-interpretation) for full field definitions.
+The source-map file (`/tmp/source-map.json`) contains the detailed mapping:
+
+```json
+{
+  "entries": [
+    {
+      "prefix": "10.0.0.0/22",
+      "sources": [
+        {"index": 0, "cidr": "10.0.0.0/24", "comment": null},
+        {"index": 1, "cidr": "10.0.1.0/24", "comment": null},
+        {"index": 2, "cidr": "10.0.2.5/32", "comment": null},
+        {"index": 3, "cidr": "10.0.3.0/25", "comment": null}
+      ],
+      "over_coverage": 383
+    }
+  ],
+  "stats": { ... }
+}
+```
+
+What happened: All 4 inputs were merged into a single /22. The source-map file shows which input lines (by zero-based index) are covered by each output prefix. Over-coverage of 383 means 383 IPs in the /22 were not in any original input. See [User Guide — Source-Map Interpretation](USER_GUIDE.md#source-map-interpretation) for full field definitions.
 
 ## Scenario 6: Ratio-Capped Mode
 

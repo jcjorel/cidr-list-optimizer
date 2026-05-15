@@ -23,7 +23,7 @@ cidr-optimizer [OPTIONS] [INPUT]
 | `--max-prefix-len-v6 <N>` | u8 | 128 | Maximum output prefix length for IPv6 |
 | `--max-input-entries <N>` | usize | 10,000,000 | Maximum input entries before error |
 | `--format <FMT>` | enum | `plain` | Output format: `plain`, `json`, `aws` |
-| `--provenance` | bool | false | Include provenance in output |
+| `--source-map <FILE>` | PathBuf | — | Write source-map JSON to FILE |
 | `--stats` | bool | false | Print statistics to stderr |
 | `--validate` | bool | false | Verify all inputs are covered by output |
 
@@ -108,7 +108,7 @@ The CLI parses `--ipv4-target` / `--ipv6-target` strings into `TargetSpec`:
 | `max_prefix_len_v4` | `u8` | `32` | 1..=32 | Longest IPv4 prefix in output |
 | `max_prefix_len_v6` | `u8` | `128` | 1..=128 | Longest IPv6 prefix in output |
 | `max_input_entries` | `usize` | `10_000_000` | 1..=∞ | Input size bound |
-| `provenance` | `bool` | `false` | — | Track which inputs map to each output |
+| `source_map` | `bool` | `false` | — | Track which inputs map to each output |
 
 ### `Phase` Enum (Progress Callbacks)
 
@@ -135,7 +135,7 @@ pub struct OptimizationResult {
 
 pub struct AggregatedEntry {
     pub prefix: IpNet,
-    pub source_indices: Option<Vec<usize>>,  // None if provenance disabled
+    pub source_indices: Option<Vec<usize>>,  // None if source_map disabled
     pub over_coverage: u128,
 }
 
@@ -215,7 +215,6 @@ One CIDR per line, sorted by network address ascending (IPv4 before IPv6):
     {
       "prefix": "10.0.0.0/22",
       "source_count": 4,
-      "sources": ["index:0", "index:1", "index:2", "index:3"],
       "over_coverage": 384
     }
   ],
@@ -237,8 +236,7 @@ One CIDR per line, sorted by network address ascending (IPv4 before IPv6):
 
 Fields:
 - `prefix`: Output CIDR string
-- `source_count`: Number of original inputs covered (0 if provenance disabled)
-- `sources`: Array of `"index:N"` references to input line positions (only with `--provenance`)
+- `source_count`: Number of original inputs covered (0 if source-map disabled)
 - `over_coverage`: Number of IPs in this prefix NOT in any input entry
 
 ### AWS
@@ -253,9 +251,40 @@ Array suitable for `aws ec2 modify-managed-prefix-list --add-entries`:
 ]
 ```
 
-## Provenance Interpretation
+## Source-Map File Format
 
-When `--provenance` is enabled, each output entry reports which original inputs it encompasses.
+When `--source-map <FILE>` is specified, the detailed source mapping is written to the given file in JSON format (regardless of `--format`):
+
+```json
+{
+  "entries": [
+    {
+      "prefix": "10.0.0.0/22",
+      "sources": [
+        {"index": 0, "cidr": "10.0.0.0/24", "comment": null},
+        {"index": 1, "cidr": "10.0.1.0/24", "comment": "partner-A"}
+      ],
+      "over_coverage": 512
+    }
+  ],
+  "stats": {
+    "input_ipv4_count": 500000,
+    "input_ipv6_count": 0,
+    "output_ipv4_count": 1000,
+    "output_ipv6_count": 0,
+    "total_ipv4_over_coverage": 28456,
+    "total_ipv6_over_coverage": 0,
+    "ipv4_compression_ratio": 500.0,
+    "ipv6_compression_ratio": 1.0,
+    "ipv4_target_binding": true,
+    "ipv6_target_binding": false
+  }
+}
+```
+
+## Source-Map Interpretation
+
+When `--source-map <FILE>` is used, the source-map file reports which original inputs each output prefix encompasses.
 
 ### Fields
 
@@ -312,7 +341,7 @@ Rules:
 - Bare IP addresses without a prefix length are treated as host addresses (`/32` for IPv4, `/128` for IPv6)
 - Non-canonical CIDRs (host bits set) are normalized with a warning: `10.0.0.5/24` → `10.0.0.0/24`
 - Maximum line length: 4096 bytes
-- Entry indices for provenance are assigned sequentially, counting only valid entries (not comments/blanks)
+- Entry indices for source-map are assigned sequentially, counting only valid entries (not comments/blanks)
 
 ## Additional Library API
 
@@ -334,7 +363,7 @@ pub fn parse_input(
 ) -> Result<ParsedInput, OptimizerError>
 ```
 
-Parses input into partitioned IPv4/IPv6 vectors with original indices. Set `store_strings = true` to retain original input strings (needed for provenance display). Returns `ParsedInput` with fields:
+Parses input into partitioned IPv4/IPv6 vectors with original indices. Set `store_strings = true` to retain original input strings (needed for source-map display). Returns `ParsedInput` with fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -423,10 +452,10 @@ echo "Coverage check passed (exit $?)"
 - Lowering `max_prefix_len_v4` (e.g., to 24) forces all /25–/32 inputs to widen to /24, increasing over-coverage but reducing entry count before the lossy phase even runs
 - Useful when the downstream system has its own prefix length restrictions
 
-### Memory vs Provenance
+### Memory vs Source-Map
 
-- Provenance tracking increases memory usage proportionally to input size
-- Disable provenance for maximum throughput when audit trail is not needed
+- Source-map tracking increases memory usage proportionally to input size
+- Disable source-map for maximum throughput when audit trail is not needed
 
 ### Large Inputs (>1M entries)
 

@@ -1,6 +1,6 @@
 # cidr-list-optimizer
 
-Fit oversized IP allow-lists into AWS entry limits by computing the least-worst superset — with bounded over-exposition and full provenance tracking.
+Fit oversized IP allow-lists into AWS entry limits by computing the least-worst superset — with bounded over-exposition and full source-map tracking.
 
 ## The Problem
 
@@ -11,7 +11,7 @@ AWS networking services impose hard limits on allow-list entries (Security Group
 - Lossless CIDR aggregation
 - Budget-constrained lossy optimization with minimal over-exposition
 - Per-address-family independent targets
-- Provenance tracking
+- Source-map tracking
 - Over-coverage percentage cap
 - AWS-native output formats
 - Deterministic output

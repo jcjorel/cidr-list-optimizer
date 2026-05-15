@@ -160,14 +160,14 @@ fn test_single_entry_edge_cases() {
         assert_eq!(result.entries.len(), 1);
     }
 
-    // (c) Single IPv6 /128, provenance=true
+    // (c) Single IPv6 /128, source_map=true
     {
         let input: Vec<IpNet> = vec!["2001:db8::1/128".parse().unwrap()];
         let config = OptimizerConfig {
-            provenance: true,
+            source_map: true,
             ..Default::default()
         };
-        let result = time_it("adversarial_single_v6_provenance", || {
+        let result = time_it("adversarial_single_v6_source_map", || {
             optimize(&input, &config).unwrap()
         });
         assert!(validate_coverage(&input, &result.entries));

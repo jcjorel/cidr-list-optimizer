@@ -17,7 +17,7 @@ pub struct OptimizerConfig {
     pub max_prefix_len_v4: u8,
     pub max_prefix_len_v6: u8,
     pub max_input_entries: usize,
-    pub provenance: bool,
+    pub source_map: bool,
 }
 
 impl Default for OptimizerConfig {
@@ -29,7 +29,7 @@ impl Default for OptimizerConfig {
             max_prefix_len_v4: 32,
             max_prefix_len_v6: 128,
             max_input_entries: 10_000_000,
-            provenance: false,
+            source_map: false,
         }
     }
 }
@@ -48,7 +48,7 @@ pub enum Phase {
     Done,
 }
 
-/// A single output prefix with optional provenance.
+/// A single output prefix with optional source-map.
 pub struct AggregatedEntry {
     pub prefix: IpNet,
     pub source_indices: Option<Vec<usize>>,
@@ -73,6 +73,19 @@ pub struct OptimizationStats {
     pub ipv6_target_binding: bool,
 }
 
+/// A single input entry with its original text and optional inline comment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputEntry {
+    pub original: String,
+    pub comment: Option<String>,
+}
+
+/// Result from `optimize_from_reader`: optimization output plus input metadata.
+pub struct ReaderResult {
+    pub result: OptimizationResult,
+    pub input_metadata: Vec<InputEntry>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +99,6 @@ mod tests {
         assert_eq!(cfg.max_prefix_len_v4, 32);
         assert_eq!(cfg.max_prefix_len_v6, 128);
         assert_eq!(cfg.max_input_entries, 10_000_000);
-        assert!(!cfg.provenance);
+        assert!(!cfg.source_map);
     }
 }

@@ -4,11 +4,11 @@ pub mod parser;
 pub mod lossless;
 pub mod trie;
 pub mod optimizer;
-pub mod provenance;
+pub mod source_map;
 
 pub use types::{
-    AddressFamily, AggregatedEntry, OptimizerConfig, OptimizationResult, OptimizationStats, Phase,
-    TargetSpec,
+    AddressFamily, AggregatedEntry, InputEntry, OptimizerConfig, OptimizationResult,
+    OptimizationStats, Phase, ReaderResult, TargetSpec,
 };
 pub use error::{OptimizeError, OptimizerError};
 
@@ -17,7 +17,7 @@ use std::ops::ControlFlow;
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
-use crate::lossless::ProvenancePrefix;
+use crate::lossless::SourceMapPrefix;
 
 /// Primary API: optimize from pre-parsed prefixes.
 pub fn optimize(
@@ -115,8 +115,8 @@ pub fn optimize_with_progress(
 
     let mut result = build_result(output_v4, output_v6, input_ipv4_count, input_ipv6_count, ipv4_target_binding, ipv6_target_binding)?;
 
-    // Populate provenance via binary search when enabled
-    if config.provenance {
+    // Populate source-map via binary search when enabled
+    if config.source_map {
         let (sorted_v4, sorted_v6) = partition_with_indices(prefixes);
         let mut sorted_v4 = sorted_v4;
         let mut sorted_v6 = sorted_v6;
@@ -130,8 +130,8 @@ pub fn optimize_with_progress(
             .filter_map(|e| if let IpNet::V6(v6) = e.prefix { Some(v6) } else { None })
             .collect();
 
-        let prov_v4 = provenance::compute_provenance_v4(&output_v4_nets, &sorted_v4);
-        let prov_v6 = provenance::compute_provenance_v6(&output_v6_nets, &sorted_v6);
+        let prov_v4 = source_map::compute_source_map_v4(&output_v4_nets, &sorted_v4);
+        let prov_v6 = source_map::compute_source_map_v6(&output_v6_nets, &sorted_v6);
 
         let mut v4_idx = 0;
         let mut v6_idx = 0;
@@ -165,8 +165,8 @@ pub fn optimize_with_progress(
 pub fn optimize_from_reader(
     input: impl BufRead,
     config: &OptimizerConfig,
-) -> Result<OptimizationResult, OptimizerError> {
-    let parsed = parser::parse_input(input, config.provenance, config.max_input_entries)?;
+) -> Result<ReaderResult, OptimizerError> {
+    let parsed = parser::parse_input(input, config.source_map, config.max_input_entries)?;
     let prefixes: Vec<IpNet> = parsed
         .ipv4
         .iter()
@@ -176,7 +176,11 @@ pub fn optimize_from_reader(
     if prefixes.is_empty() {
         return Err(OptimizeError::EmptyInput.into());
     }
-    Ok(optimize(&prefixes, config)?)
+    let result = optimize(&prefixes, config)?;
+    Ok(ReaderResult {
+        result,
+        input_metadata: parsed.input_metadata,
+    })
 }
 
 fn validate_config(config: &OptimizerConfig) -> Result<(), OptimizeError> {
@@ -229,14 +233,14 @@ fn partition_with_indices(prefixes: &[IpNet]) -> (Vec<(usize, Ipv4Net)>, Vec<(us
     (ipv4, ipv6)
 }
 
-fn compute_covered_ips_v4(lossless: &[ProvenancePrefix<Ipv4Net>]) -> u128 {
+fn compute_covered_ips_v4(lossless: &[SourceMapPrefix<Ipv4Net>]) -> u128 {
     lossless.iter().map(|e| {
         let pl = e.prefix.prefix_len();
         if pl == 32 { 1u128 } else { 1u128 << (32 - pl) }
     }).sum()
 }
 
-fn compute_covered_ips_v6(lossless: &[ProvenancePrefix<Ipv6Net>]) -> u128 {
+fn compute_covered_ips_v6(lossless: &[SourceMapPrefix<Ipv6Net>]) -> u128 {
     lossless.iter().map(|e| {
         let pl = e.prefix.prefix_len();
         if pl == 128 { 1u128 } else if (128 - pl) >= 128 { u128::MAX } else { 1u128 << (128 - pl) }
@@ -244,30 +248,30 @@ fn compute_covered_ips_v6(lossless: &[ProvenancePrefix<Ipv6Net>]) -> u128 {
 }
 
 fn lossy_optimize_v4(
-    lossless: &[ProvenancePrefix<Ipv4Net>],
+    lossless: &[SourceMapPrefix<Ipv4Net>],
     target: usize,
     max_ratio: Option<f64>,
     input_covered_ips: u128,
-) -> Result<Vec<ProvenancePrefix<Ipv4Net>>, OptimizeError> {
+) -> Result<Vec<SourceMapPrefix<Ipv4Net>>, OptimizeError> {
     let mut trie = trie::BinaryTrie::build_from_v4(lossless)?;
     let _leaf_indices = optimizer::optimize_trie(&mut trie, target, max_ratio, input_covered_ips);
     Ok(trie.extract_leaves_v4())
 }
 
 fn lossy_optimize_v6(
-    lossless: &[ProvenancePrefix<Ipv6Net>],
+    lossless: &[SourceMapPrefix<Ipv6Net>],
     target: usize,
     max_ratio: Option<f64>,
     input_covered_ips: u128,
-) -> Result<Vec<ProvenancePrefix<Ipv6Net>>, OptimizeError> {
+) -> Result<Vec<SourceMapPrefix<Ipv6Net>>, OptimizeError> {
     let mut trie = trie::BinaryTrie::build_from_v6(lossless)?;
     let _leaf_indices = optimizer::optimize_trie(&mut trie, target, max_ratio, input_covered_ips);
     Ok(trie.extract_leaves_v6())
 }
 
 fn build_result(
-    output_v4: Vec<ProvenancePrefix<Ipv4Net>>,
-    output_v6: Vec<ProvenancePrefix<Ipv6Net>>,
+    output_v4: Vec<SourceMapPrefix<Ipv4Net>>,
+    output_v6: Vec<SourceMapPrefix<Ipv6Net>>,
     input_ipv4_count: usize,
     input_ipv6_count: usize,
     ipv4_target_binding: bool,

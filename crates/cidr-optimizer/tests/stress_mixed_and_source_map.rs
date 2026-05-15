@@ -8,16 +8,16 @@ use ipnet::IpNet;
 
 use common::{generate_contiguous_v4, generate_contiguous_v6, time_it};
 
-// --- 8a: Mixed IPv4+IPv6 with provenance ---
+// --- 8a: Mixed IPv4+IPv6 with source-map ---
 
-fn run_mixed_provenance(n: usize, label: &str) {
+fn run_mixed_source_map(n: usize, label: &str) {
     let half = n / 2;
     let v4 = generate_contiguous_v4(Ipv4Addr::new(10, 0, 0, 0), half as u32);
     let v6 = generate_contiguous_v6(Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0), half as u64);
     let input: Vec<IpNet> = v4.into_iter().chain(v6.into_iter()).collect();
 
     let config = OptimizerConfig {
-        provenance: true,
+        source_map: true,
         ..Default::default()
     };
 
@@ -25,7 +25,7 @@ fn run_mixed_provenance(n: usize, label: &str) {
     assert!(validate_coverage(&input, &result.entries));
 
     for entry in &result.entries {
-        let indices = entry.source_indices.as_ref().expect("provenance must be set");
+        let indices = entry.source_indices.as_ref().expect("source_map must be set");
         match entry.prefix {
             IpNet::V4(_) => {
                 for &idx in indices {
@@ -42,29 +42,29 @@ fn run_mixed_provenance(n: usize, label: &str) {
 }
 
 #[test]
-fn test_10k_mixed_provenance() {
-    run_mixed_provenance(10_000, "10k_mixed_provenance");
+fn test_10k_mixed_source_map() {
+    run_mixed_source_map(10_000, "10k_mixed_source_map");
 }
 
 #[test]
 #[cfg_attr(not(feature = "stress"), ignore)]
-fn test_100k_mixed_provenance() {
-    run_mixed_provenance(100_000, "100k_mixed_provenance");
+fn test_100k_mixed_source_map() {
+    run_mixed_source_map(100_000, "100k_mixed_source_map");
 }
 
 #[test]
 #[cfg_attr(not(feature = "stress"), ignore)]
-fn test_1m_mixed_provenance() {
-    run_mixed_provenance(1_000_000, "1m_mixed_provenance");
+fn test_1m_mixed_source_map() {
+    run_mixed_source_map(1_000_000, "1m_mixed_source_map");
 }
 
-// --- 8b: Provenance completeness under lossy ---
+// --- 8b: Source-map completeness under lossy ---
 
-fn run_provenance_completeness(n: u32, label: &str) {
+fn run_source_map_completeness(n: u32, label: &str) {
     let input = generate_contiguous_v4(Ipv4Addr::new(10, 0, 0, 0), n);
     let config = OptimizerConfig {
         ipv4_target: Some(TargetSpec::EntryCount(100)),
-        provenance: true,
+        source_map: true,
         max_over_coverage_ratio: None,
         ..Default::default()
     };
@@ -74,35 +74,35 @@ fn run_provenance_completeness(n: u32, label: &str) {
 
     let mut all_indices: HashSet<usize> = HashSet::new();
     for entry in &result.entries {
-        let indices = entry.source_indices.as_ref().expect("provenance must be set");
+        let indices = entry.source_indices.as_ref().expect("source_map must be set");
         for &idx in indices {
             all_indices.insert(idx);
         }
     }
     let expected: HashSet<usize> = (0..n as usize).collect();
-    assert_eq!(all_indices, expected, "provenance completeness failed for {}", label);
+    assert_eq!(all_indices, expected, "source-map completeness failed for {}", label);
 }
 
 #[test]
-fn test_10k_provenance_completeness() {
-    run_provenance_completeness(10_000, "10k_provenance_completeness");
-}
-
-#[test]
-#[cfg_attr(not(feature = "stress"), ignore)]
-fn test_100k_provenance_completeness() {
-    run_provenance_completeness(100_000, "100k_provenance_completeness");
+fn test_10k_source_map_completeness() {
+    run_source_map_completeness(10_000, "10k_source_map_completeness");
 }
 
 #[test]
 #[cfg_attr(not(feature = "stress"), ignore)]
-fn test_1m_provenance_completeness() {
-    run_provenance_completeness(1_000_000, "1m_provenance_completeness");
+fn test_100k_source_map_completeness() {
+    run_source_map_completeness(100_000, "100k_source_map_completeness");
+}
+
+#[test]
+#[cfg_attr(not(feature = "stress"), ignore)]
+fn test_1m_source_map_completeness() {
+    run_source_map_completeness(1_000_000, "1m_source_map_completeness");
 }
 
 // --- 8c: Duplicate inputs ---
 
-fn run_duplicates_provenance(n: usize, label: &str) {
+fn run_duplicates_source_map(n: usize, label: &str) {
     let half = n / 2;
     let net_a: IpNet = "10.0.0.0/24".parse().unwrap();
     let net_b: IpNet = "192.168.0.0/24".parse().unwrap();
@@ -111,7 +111,7 @@ fn run_duplicates_provenance(n: usize, label: &str) {
         .collect();
 
     let config = OptimizerConfig {
-        provenance: true,
+        source_map: true,
         ..Default::default()
     };
 
@@ -120,24 +120,24 @@ fn run_duplicates_provenance(n: usize, label: &str) {
     assert_eq!(result.entries.len(), 2, "expected 2 entries for duplicates");
 
     for entry in &result.entries {
-        let indices = entry.source_indices.as_ref().expect("provenance must be set");
+        let indices = entry.source_indices.as_ref().expect("source_map must be set");
         assert_eq!(indices.len(), half, "each entry should have {} source indices", half);
     }
 }
 
 #[test]
-fn test_10k_duplicates_provenance() {
-    run_duplicates_provenance(10_000, "10k_duplicates_provenance");
+fn test_10k_duplicates_source_map() {
+    run_duplicates_source_map(10_000, "10k_duplicates_source_map");
 }
 
 #[test]
 #[cfg_attr(not(feature = "stress"), ignore)]
-fn test_100k_duplicates_provenance() {
-    run_duplicates_provenance(100_000, "100k_duplicates_provenance");
+fn test_100k_duplicates_source_map() {
+    run_duplicates_source_map(100_000, "100k_duplicates_source_map");
 }
 
 #[test]
 #[cfg_attr(not(feature = "stress"), ignore)]
-fn test_1m_duplicates_provenance() {
-    run_duplicates_provenance(1_000_000, "1m_duplicates_provenance");
+fn test_1m_duplicates_source_map() {
+    run_duplicates_source_map(1_000_000, "1m_duplicates_source_map");
 }

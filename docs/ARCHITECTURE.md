@@ -39,7 +39,7 @@
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Phase 4: Result Assembly                                           │
 │  • Leaf extraction & sorting (IPv4 before IPv6, by network addr)    │
-│  • Provenance computation (binary search, opt-in)                   │
+│  • Source-map computation (binary search, opt-in)                    │
 │  • Coverage validation                                              │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -71,7 +71,7 @@ This hybrid avoids the worst case of a full trie (12.8M nodes for 100K scattered
 
 ### Phase 1: Parse & Partition
 
-Parses input line-by-line, assigning sequential indices for provenance tracking. Each entry is normalized (host bits truncated: `10.0.0.5/24` → `10.0.0.0/24`) and partitioned into IPv4/IPv6 streams. Non-canonical CIDRs emit a warning. Comments (`#`) and blank lines are skipped. Input size is bounded by `max_input_entries` to prevent OOM.
+Parses input line-by-line, assigning sequential indices for source-map tracking. Each entry is normalized (host bits truncated: `10.0.0.5/24` → `10.0.0.0/24`) and partitioned into IPv4/IPv6 streams. Non-canonical CIDRs emit a warning. Comments (`#`) and blank lines are skipped. Input size is bounded by `max_input_entries` to prevent OOM.
 
 ### Phase 2: Sort-Based Lossless Aggregation
 
@@ -81,9 +81,9 @@ Three sub-phases produce a minimal lossless prefix set:
 - IPv4: 4 address bytes + 1 prefix_len byte = 5 passes
 - IPv6: 16 address bytes + 1 prefix_len byte = 17 passes
 
-**Redundancy elimination** — A monotone stack processes sorted prefixes. For each prefix P: pop entries that do not contain P (they go to output); if the new top contains P, P is redundant (record provenance); otherwise push P.
+**Redundancy elimination** — A monotone stack processes sorted prefixes. For each prefix P: pop entries that do not contain P (they go to output); if the new top contains P, P is redundant (record source mapping); otherwise push P.
 
-**Sibling merging** — After sorting by (prefix_length DESC, network_address ASC), a stack-based pass merges siblings bottom-up with cascading. When the top two stack entries are siblings (same length, addresses differ only in bit at position L−1), they merge to their parent (length L−1, union provenance). The merged result may form a new sibling pair, triggering further merges up the tree. O(n) amortized — each entry is pushed/popped at most O(depth) times, total merges ≤ n−1.
+**Sibling merging** — After sorting by (prefix_length DESC, network_address ASC), a stack-based pass merges siblings bottom-up with cascading. When the top two stack entries are siblings (same length, addresses differ only in bit at position L−1), they merge to their parent (length L−1, union source indices). The merged result may form a new sibling pair, triggering further merges up the tree. O(n) amortized — each entry is pushed/popped at most O(depth) times, total merges ≤ n−1.
 
 Between redundancy elimination and sibling merging, `max_prefix_len` is enforced by truncating, re-sorting, and re-deduplicating.
 
@@ -114,7 +114,7 @@ cost = capacity(node) - coverage(node)
 
 ### Phase 4: Result Assembly
 
-Remaining trie leaves are collected as output prefixes, sorted by network address (IPv4 before IPv6). When provenance is enabled, binary search on the sorted original input identifies which entries each output prefix covers. Per-prefix over-coverage is computed as `capacity − coverage`.
+Remaining trie leaves are collected as output prefixes, sorted by network address (IPv4 before IPv6). When source-map is enabled, binary search on the sorted original input identifies which entries each output prefix covers. Per-prefix over-coverage is computed as `capacity − coverage`.
 
 ## Data Structures
 
@@ -154,9 +154,9 @@ EfficiencyKey {
 
 `EfficiencyKey` implements `Ord` via 160-bit widening multiplication: comparing `cost_a / savings_a` vs `cost_b / savings_b` is done as `cost_a × savings_b` vs `cost_b × savings_a` (cross-multiply to avoid division and maintain exact ordering). The multiplication uses a `(u64, u128)` pair representing a 160-bit result. The root node (depth=0) uses maximum cost — collapsed only as last resort. Ties are broken by `node_idx` for determinism.
 
-### Provenance Storage
+### Source-Map Storage
 
-When enabled, each lossless prefix carries a `Vec<usize>` of original input indices. During sibling merging, provenance vectors are concatenated. During lossy optimization, provenance is not tracked in the trie — instead, it is reconstructed in Phase 4 via binary search on the sorted input (O(output × log n)).
+When enabled, each lossless prefix carries a `Vec<usize>` of original input indices. During sibling merging, source-index vectors are concatenated. During lossy optimization, source mapping is not tracked in the trie — instead, it is reconstructed in Phase 4 via binary search on the sorted input (O(output × log n)).
 
 ## Cost-Efficiency Greedy Rationale
 
@@ -228,7 +228,7 @@ The ratio tracks only over-coverage introduced by the lossy greedy phase. Over-c
 | Radix sort + lossless aggregation | O(n) | O(n) |
 | Build path-compressed trie (from k lossless entries) | O(k × d) | O(k × d) |
 | Lossy greedy (BinaryHeap) | O(k log k) | O(k) |
-| Provenance extraction | O(output × log n) | O(n) |
+| Source-map extraction | O(output × log n) | O(n) |
 
 Overall: **O(n + k log k)** time, **O(n)** space. Since k ≤ n (lossless output ≤ input), and typically k ≪ n, the radix sort dominates for large inputs.
 
@@ -241,9 +241,9 @@ Overall: **O(n + k log k)** time, **O(n)** space. Since k ≤ n (lossless output
 | Lossless output (est. 200K) | ~32 bytes | 6 MB |
 | Path-compressed trie (est. 400K nodes) | ~80 bytes | 32 MB |
 | BinaryHeap | ~24 bytes/entry | 5 MB |
-| **Total (no provenance)** | | **~75 MB** |
+| **Total (no source-map)** | | **~75 MB** |
 
-With provenance: add ~24 bytes/input entry for `source_indices` storage (+24 MB for 1M entries).
+With source-map: add ~24 bytes/input entry for `source_indices` storage (+24 MB for 1M entries).
 
 Worst case (scattered /32s, no sharing): trie reaches ~2× lossless count nodes. For 500K lossless entries: ~80 MB trie. Total stays well under 2 GB for IPv4.
 
@@ -271,7 +271,7 @@ crates/
 │       ├── lossless.rs          Sort-based lossless aggregation: radix sort, redundancy
 │       │                        elimination (monotone stack), max_prefix_len enforcement,
 │       │                        and sibling merging with cascading. Operates on
-│       │                        ProvenancePrefix<T> carrying source indices.
+│       │                        SourceMapPrefix<T> carrying source indices.
 │       ├── trie.rs              Path-compressed binary trie: arena-allocated nodes,
 │       │                        construction from lossless output, bottom-up coverage/
 │       │                        leaf_count computation, collapse execution, and leaf
@@ -281,7 +281,7 @@ crates/
 │       │                        efficiency ranking, generation-based staleness, ratio
 │       │                        cap checking, and ancestor update propagation. Operates
 │       │                        on BinaryTrie without knowledge of address family.
-│       └── provenance.rs        Post-optimization provenance reconstruction via binary
+│       └── source_map.rs        Post-optimization source-map reconstruction via binary
 │                                search on sorted input. Maps each output prefix to the
 │                                set of original input indices it covers.
 │
@@ -293,7 +293,7 @@ crates/
                                  Contains no optimization logic.
 ```
 
-**Interface boundaries**: The CLI depends on the library's public API only (`optimize`, `optimize_from_reader`, `validate_coverage`, `OptimizerConfig`, result types). The library modules have a layered dependency: `lib.rs` → `lossless` → (radix sort internals); `lib.rs` → `trie` → `optimizer`; `lib.rs` → `provenance`. The `trie` and `optimizer` modules are decoupled — `optimizer` receives a `&mut BinaryTrie` and drives the greedy loop without knowing how the trie was constructed.
+**Interface boundaries**: The CLI depends on the library's public API only (`optimize`, `optimize_from_reader`, `validate_coverage`, `OptimizerConfig`, result types). The library modules have a layered dependency: `lib.rs` → `lossless` → (radix sort internals); `lib.rs` → `trie` → `optimizer`; `lib.rs` → `source_map`. The `trie` and `optimizer` modules are decoupled — `optimizer` receives a `&mut BinaryTrie` and drives the greedy loop without knowing how the trie was constructed.
 
 ## References
 

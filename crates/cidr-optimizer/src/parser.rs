@@ -3,13 +3,14 @@ use std::io::BufRead;
 use ipnet::{Ipv4Net, Ipv6Net};
 
 use crate::error::{OptimizeError, OptimizerError};
+use crate::types::InputEntry;
 
 /// Parsed and partitioned input.
 #[derive(Debug)]
 pub struct ParsedInput {
     pub ipv4: Vec<(usize, Ipv4Net)>,
     pub ipv6: Vec<(usize, Ipv6Net)>,
-    pub original_strings: Vec<String>,
+    pub input_metadata: Vec<InputEntry>,
     pub total_entries: usize,
     pub parse_warnings: Vec<(usize, String)>,
 }
@@ -23,12 +24,12 @@ const MAX_WARNINGS: usize = 1000;
 /// Parse input lines into partitioned IPv4/IPv6 prefix vectors with indices.
 pub fn parse_input(
     mut input: impl BufRead,
-    store_strings: bool,
+    store_metadata: bool,
     max_entries: usize,
 ) -> Result<ParsedInput, OptimizerError> {
     let mut ipv4 = Vec::new();
     let mut ipv6 = Vec::new();
-    let mut original_strings = Vec::new();
+    let mut input_metadata = Vec::new();
     let mut warnings = Vec::new();
     let mut entry_index: usize = 0;
     let mut line_num: usize = 0;
@@ -63,16 +64,29 @@ pub fn parse_input(
             .into());
         }
 
-        if store_strings {
-            original_strings.push(trimmed.to_string());
+        // Split on first '#' to separate CIDR from inline comment
+        let (cidr_part, comment) = if let Some(hash_pos) = trimmed.find('#') {
+            let cidr = trimmed[..hash_pos].trim();
+            let raw_comment = trimmed[hash_pos + 1..].trim();
+            let comment = if raw_comment.is_empty() { None } else { Some(raw_comment.to_string()) };
+            (cidr, comment)
+        } else {
+            (trimmed, None)
+        };
+
+        if store_metadata {
+            input_metadata.push(InputEntry {
+                original: cidr_part.to_string(),
+                comment,
+            });
         }
 
         // Try parsing as CIDR first, then as bare IP (with /32 or /128 suffix)
-        let parsed: Result<ipnet::IpNet, String> = if trimmed.contains('/') {
-            trimmed.parse::<ipnet::IpNet>().map_err(|e| e.to_string())
+        let parsed: Result<ipnet::IpNet, String> = if cidr_part.contains('/') {
+            cidr_part.parse::<ipnet::IpNet>().map_err(|e| e.to_string())
         } else {
             use std::net::IpAddr;
-            match trimmed.parse::<IpAddr>() {
+            match cidr_part.parse::<IpAddr>() {
                 Ok(IpAddr::V4(ip)) => Ok(ipnet::IpNet::V4(
                     Ipv4Net::new(ip, 32).unwrap(),
                 )),
@@ -112,7 +126,7 @@ pub fn parse_input(
             Err(_) => {
                 return Err(OptimizerError::Parse {
                     line: line_num + 1,
-                    message: format!("invalid IP or CIDR: '{}'", &trimmed[..trimmed.len().min(100)]),
+                    message: format!("invalid IP or CIDR: '{}'", &cidr_part[..cidr_part.len().min(100)]),
                 });
             }
         }
@@ -122,7 +136,7 @@ pub fn parse_input(
     Ok(ParsedInput {
         ipv4,
         ipv6,
-        original_strings,
+        input_metadata,
         total_entries: entry_index,
         parse_warnings: warnings,
     })
@@ -180,8 +194,33 @@ mod tests {
     fn parse_stores_strings_when_enabled() {
         let input = "10.0.0.0/8\n192.168.1.1\n";
         let result = parse_input(Cursor::new(input), true, 100).unwrap();
-        assert_eq!(result.original_strings.len(), 2);
-        assert_eq!(result.original_strings[0], "10.0.0.0/8");
-        assert_eq!(result.original_strings[1], "192.168.1.1");
+        assert_eq!(result.input_metadata.len(), 2);
+        assert_eq!(result.input_metadata[0].original, "10.0.0.0/8");
+        assert_eq!(result.input_metadata[0].comment, None);
+        assert_eq!(result.input_metadata[1].original, "192.168.1.1");
+        assert_eq!(result.input_metadata[1].comment, None);
+    }
+
+    #[test]
+    fn parse_inline_comment() {
+        let input = "10.0.0.0/8 # Office\n";
+        let result = parse_input(Cursor::new(input), true, 100).unwrap();
+        assert_eq!(result.input_metadata.len(), 1);
+        assert_eq!(result.input_metadata[0].original, "10.0.0.0/8");
+        assert_eq!(result.input_metadata[0].comment, Some("Office".to_string()));
+    }
+
+    #[test]
+    fn parse_inline_comment_empty_after_trim() {
+        let input = "10.0.0.0/8 #\n";
+        let result = parse_input(Cursor::new(input), true, 100).unwrap();
+        assert_eq!(result.input_metadata[0].comment, None);
+    }
+
+    #[test]
+    fn parse_inline_comment_multiple_hashes() {
+        let input = "10.0.0.0/8 # comment # more\n";
+        let result = parse_input(Cursor::new(input), true, 100).unwrap();
+        assert_eq!(result.input_metadata[0].comment, Some("comment # more".to_string()));
     }
 }
