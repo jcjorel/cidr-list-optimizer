@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
 
-use cidr_optimizer::{optimize, optimize_from_reader, validate_coverage, OptimizerConfig, TargetSpec};
+use cidr_optimizer::{optimize_from_reader, OptimizeError, OptimizerConfig, OptimizerError, TargetSpec};
 
 #[derive(Parser)]
 #[command(name = "cidr-optimizer")]
@@ -52,10 +52,6 @@ struct Cli {
     /// Show statistics on stderr
     #[arg(long)]
     stats: bool,
-
-    /// Validate output covers all inputs
-    #[arg(long)]
-    validate: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -179,39 +175,19 @@ fn main() -> Result<()> {
         source_map: cli.source_map.is_some(),
     };
 
-    // For --validate, we need the original parsed prefixes
-    let (result, input_metadata) = if cli.validate {
-        let reader: Box<dyn BufRead> = if cli.input == "-" {
-            Box::new(BufReader::new(io::stdin()))
-        } else {
-            Box::new(BufReader::new(File::open(&cli.input)?))
-        };
-
-        // Parse input first to retain original prefixes for validation
-        let parsed = cidr_optimizer::parser::parse_input(reader, config.source_map, config.max_input_entries)?;
-        let prefixes: Vec<ipnet::IpNet> = parsed
-            .ipv4.iter().map(|(_, p)| ipnet::IpNet::V4(*p))
-            .chain(parsed.ipv6.iter().map(|(_, p)| ipnet::IpNet::V6(*p)))
-            .collect();
-
-        let opt_result = optimize(&prefixes, &config)?;
-
-        // Validate coverage
-        if !validate_coverage(&prefixes, &opt_result.entries) {
-            eprintln!("error: validation failed — not all inputs are covered by output");
+    // Run optimization
+    let reader: Box<dyn BufRead> = if cli.input == "-" {
+        Box::new(BufReader::new(io::stdin()))
+    } else {
+        Box::new(BufReader::new(File::open(&cli.input)?))
+    };
+    let (result, input_metadata) = match optimize_from_reader(reader, &config) {
+        Ok(reader_result) => (reader_result.result, reader_result.input_metadata),
+        Err(OptimizerError::Optimize(OptimizeError::CoverageLost)) => {
+            eprintln!("internal error: coverage invariant violated — this is a bug, please report it");
             process::exit(1);
         }
-        eprintln!("Validation passed: all inputs covered");
-
-        (opt_result, parsed.input_metadata)
-    } else {
-        let reader: Box<dyn BufRead> = if cli.input == "-" {
-            Box::new(BufReader::new(io::stdin()))
-        } else {
-            Box::new(BufReader::new(File::open(&cli.input)?))
-        };
-        let reader_result = optimize_from_reader(reader, &config)?;
-        (reader_result.result, reader_result.input_metadata)
+        Err(e) => return Err(e.into()),
     };
 
     // Fail hard if EntryCount target was not met (not for MaxOverCoverage)

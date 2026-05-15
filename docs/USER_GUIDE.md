@@ -25,14 +25,13 @@ cidr-optimizer [OPTIONS] [INPUT]
 | `--format <FMT>` | enum | `plain` | Output format: `plain`, `json`, `aws` |
 | `--source-map <FILE>` | PathBuf | — | Write source-map JSON to FILE |
 | `--stats` | bool | false | Print statistics to stderr |
-| `--validate` | bool | false | Verify all inputs are covered by output |
 
 ### Exit Codes
 
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Validation failure (`--validate` and coverage lost) |
+| 1 | Internal error (coverage invariant violation — indicates a bug) |
 | 2 | Target unreachable (over-coverage cap prevents meeting budget) |
 
 ### `--max-over-coverage` Behavior
@@ -317,14 +316,6 @@ Each element in `sources`:
 - **Incremental updates**: When an input entry is removed, search `sources[].index` to identify which output CIDRs are affected
 - **Cost analysis**: Rank output prefixes by `over_coverage` to understand aggregation cost
 
-## `--validate` Behavior
-
-When enabled, the CLI verifies that every input prefix is contained by at least one output prefix after optimization. This is a safety check — the algorithm maintains this invariant internally, but `--validate` provides an independent verification.
-
-- Adds O(N log M) post-processing time (binary search per input against sorted output)
-- Exits with code 1 if validation fails (indicates a bug)
-- Prints "Validation passed: all inputs covered" to stderr on success
-
 ## `--stats` Output
 
 Printed to stderr (does not interfere with stdout output):
@@ -355,14 +346,6 @@ Rules:
 - Entry indices for source-map are assigned sequentially, counting only valid entries (not comments/blanks)
 
 ## Additional Library API
-
-### `validate_coverage`
-
-```rust
-pub fn validate_coverage(input: &[IpNet], output: &[AggregatedEntry]) -> bool
-```
-
-Verifies that every input prefix is contained by at least one output prefix. Uses binary search on sorted output (O(N log M)). Returns `true` if all inputs are covered.
 
 ### `parser::parse_input`
 
@@ -428,9 +411,9 @@ curl -s https://feeds.example.com/partner-ips.txt \
 ### In CI/CD Pipelines
 
 ```bash
-# Validate that optimization doesn't lose coverage
-cidr-optimizer --ipv4-target 1000 --validate allow-list.txt > /dev/null
-echo "Coverage check passed (exit $?)"
+# Optimize and verify success (exit 1 = internal bug, exit 2 = target unreachable)
+cidr-optimizer --ipv4-target 1000 allow-list.txt > optimized.txt
+echo "Optimization succeeded (exit $?)"
 ```
 
 ## Performance Tuning
