@@ -82,6 +82,7 @@ A `Makefile` wraps these commands for convenience (`make build`, `make test`, `m
 - [Getting Started](docs/GETTING_STARTED.md) — Learn by doing with progressive scenarios
 - [User Guide](docs/USER_GUIDE.md) — Full CLI reference, library API, and configuration
 - [Architecture](docs/ARCHITECTURE.md) — Algorithm design, data structures, and correctness arguments
+- [Changelog](CHANGELOG.md) — Release history
 
 ## License
 

@@ -286,25 +286,36 @@ When `--source-map <FILE>` is specified, the detailed source mapping is written 
 
 When `--source-map <FILE>` is used, the source-map file reports which original inputs each output prefix encompasses.
 
-### Fields
+### Entry Fields
+
+Each entry in the `entries` array contains:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `source_indices` | `Vec<usize>` | Zero-based indices into the original input (line order, skipping comments/blanks) |
-| `source_count` | `usize` | Length of `source_indices` |
-| `over_coverage` | `u128` | IPs in this prefix not covered by any input |
+| `prefix` | string | Output CIDR (e.g. `"10.0.0.0/22"`) |
+| `sources` | array | Original inputs covered by this output prefix |
+| `over_coverage` | integer | IPs in this prefix not covered by any input |
+
+Each element in `sources`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `index` | integer | Zero-based position in the input (line order, skipping comments/blanks) |
+| `cidr` | string | Original CIDR as parsed from input |
+| `comment` | string or null | Inline comment from the input line (text after the CIDR), or `null` if none |
 
 ### Interpretation
 
-- `source_indices = [0, 1, 5]` means input entries at positions 0, 1, and 5 are covered by this output prefix
+- `sources` lists every original input entry that is contained within the output `prefix`
 - `over_coverage = 0` means the output prefix exactly covers its inputs (lossless)
 - `over_coverage > 0` means the prefix was widened during lossy optimization, including IPs not in the original input
+- `comment` preserves inline annotations from the input file, enabling traceability back to the source (e.g. partner name, ticket ID)
 
 ### Production Usage
 
-- **Audit trail**: Map firewall rules back to original allow-list entries
-- **Incremental updates**: When an input entry is removed, identify which output CIDRs are affected
-- **Cost analysis**: Rank output prefixes by over-coverage to understand aggregation cost
+- **Audit trail**: Map firewall rules back to original allow-list entries using `sources[].cidr` and `sources[].comment`
+- **Incremental updates**: When an input entry is removed, search `sources[].index` to identify which output CIDRs are affected
+- **Cost analysis**: Rank output prefixes by `over_coverage` to understand aggregation cost
 
 ## `--validate` Behavior
 
@@ -375,18 +386,7 @@ Parses input into partitioned IPv4/IPv6 vectors with original indices. Set `stor
 
 ### `OptimizationStats` Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `input_ipv4_count` | `usize` | Number of IPv4 prefixes in input |
-| `input_ipv6_count` | `usize` | Number of IPv6 prefixes in input |
-| `output_ipv4_count` | `usize` | Number of IPv4 prefixes in output |
-| `output_ipv6_count` | `usize` | Number of IPv6 prefixes in output |
-| `total_ipv4_over_coverage` | `u128` | Total IPv4 IPs in output not in any input |
-| `total_ipv6_over_coverage` | `u128` | Total IPv6 IPs in output not in any input |
-| `ipv4_compression_ratio` | `f64` | `input_ipv4_count / output_ipv4_count` |
-| `ipv6_compression_ratio` | `f64` | `input_ipv6_count / output_ipv6_count` |
-| `ipv4_target_binding` | `bool` | `true` if lossless output exceeded IPv4 target (lossy phase ran) |
-| `ipv6_target_binding` | `bool` | `true` if lossless output exceeded IPv6 target (lossy phase ran) |
+See the `OptimizationStats` struct definition in [`OptimizationResult`](#optimizationresult) above for all fields and types.
 
 ## Integration Patterns
 
