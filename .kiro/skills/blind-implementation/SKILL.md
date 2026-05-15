@@ -35,10 +35,12 @@ When constructing prompt templates, replace these variables with actual values:
 4. Write `scratchpad/<topic>/request.md` containing the user's full requirement verbatim.
 5. Set `iteration = 1` (or resume value), `max_iterations = 3`.
 6. Read `.kiro/skills/blind-implementation/references/planner-prompt.md`.
-7. Read `.kiro/skills/blind-implementation/references/implementer-prompt.md`.
-8. Read `.kiro/skills/blind-implementation/references/reviewer-prompt.md`.
-9. For each prompt template, replace all `{{variable}}` occurrences with actual values per the Template Variables table. Append a context block specifying the `request_file` path and, if iteration > 1, the `feedback_file` path.
-10. Invoke the `subagent` tool:
+7. Read `.kiro/skills/blind-implementation/references/plan-reviewer-prompt.md`.
+8. Read `.kiro/skills/blind-implementation/references/implementer-prompt.md`.
+9. Read `.kiro/skills/blind-implementation/references/tester-prompt.md`.
+10. Read `.kiro/skills/blind-implementation/references/reviewer-prompt.md`.
+11. For each prompt template, replace all `{{variable}}` occurrences with actual values per the Template Variables table. Append a context block specifying the `request_file` path and, if iteration > 1, the `feedback_file` path.
+12. Invoke the `subagent` tool:
 
 ```json
 {
@@ -51,39 +53,53 @@ When constructing prompt templates, replace these variables with actual values:
       "prompt_template": "<planner_prompt_with_substituted_variables>"
     },
     {
+      "name": "plan-reviewer",
+      "role": "kiro_default",
+      "prompt_template": "<plan_reviewer_prompt_with_substituted_variables>",
+      "depends_on": ["planner"]
+    },
+    {
       "name": "implementer",
       "role": "kiro_default",
       "prompt_template": "<implementer_prompt_with_substituted_variables>",
-      "depends_on": ["planner"]
+      "depends_on": ["plan-reviewer"]
+    },
+    {
+      "name": "tester",
+      "role": "kiro_default",
+      "prompt_template": "<tester_prompt_with_substituted_variables>",
+      "depends_on": ["implementer"]
     },
     {
       "name": "reviewer",
       "role": "kiro_default",
       "prompt_template": "<reviewer_prompt_with_substituted_variables>",
-      "depends_on": ["implementer"]
+      "depends_on": ["tester"]
     }
   ]
 }
 ```
 
-11. Verify `scratchpad/<topic>/review-v{iteration}.md` exists.
+13. Verify `scratchpad/<topic>/review-v{iteration}.md` exists.
     - If the file does not exist, report the pipeline failure to the user and ask for guidance on how to proceed.
-12. Read `scratchpad/<topic>/review-v{iteration}.md`. Parse the `verdict:` field from the YAML frontmatter.
-    - If `verdict: PASS` → proceed to step 15.
-    - If `verdict: FAIL` → continue to step 13.
-13. Read the `## Issues` section from `scratchpad/<topic>/review-v{iteration}.md`. Write `scratchpad/<topic>/feedback-v{iteration}.md` containing the issues and instruction to address them.
-14. Increment `iteration`.
-    - If `iteration <= max_iterations`: return to step 9.
-    - If `iteration > max_iterations`: proceed to step 15 with a warning.
-15. Present to the user: final verdict, list of files created/modified, and any remaining issues if max iterations was reached.
-16. Ask the user if they want to clean up `scratchpad/<topic>/`.
+14. Read `scratchpad/<topic>/review-v{iteration}.md`. Parse the `verdict:` field from the YAML frontmatter.
+    - If `verdict: PASS` → proceed to step 17.
+    - If `verdict: FAIL` → continue to step 15.
+15. Read the `## Issues` section from `scratchpad/<topic>/review-v{iteration}.md` and `scratchpad/<topic>/test-report-v{iteration}.md`. Write `scratchpad/<topic>/feedback-v{iteration}.md` containing both review issues and test failures with instruction to address them.
+16. Increment `iteration`.
+    - If `iteration <= max_iterations`: return to step 11.
+    - If `iteration > max_iterations`: proceed to step 17 with a warning.
+17. Present to the user: final verdict, list of files created/modified, and any remaining issues if max iterations was reached.
+18. Ask the user if they want to clean up `scratchpad/<topic>/`.
 
 ## File Convention
 
 | File | Written By | Read By |
 |------|-----------|---------|
 | `request.md` | Main agent | Planner |
-| `plan-v{N}.md` | Planner | Implementer, Reviewer |
-| `impl-report-v{N}.md` | Implementer | Reviewer |
+| `plan-v{N}.md` | Planner, Plan Reviewer (overwrite) | Plan Reviewer, Implementer, Reviewer |
+| `plan-review-v{N}.md` | Plan Reviewer | Main agent (informational) |
+| `impl-report-v{N}.md` | Implementer | Tester, Reviewer |
+| `test-report-v{N}.md` | Tester | Reviewer, Main agent, Planner (next iteration) |
 | `review-v{N}.md` | Reviewer | Main agent |
 | `feedback-v{N}.md` | Main agent | Planner (next iteration) |
