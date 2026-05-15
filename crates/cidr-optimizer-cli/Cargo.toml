@@ -1,7 +1,12 @@
 [package]
 name = "cidr-optimizer-cli"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+rust-version = "1.93"
+
+[[bin]]
+name = "cidr-optimizer"
+path = "src/main.rs"
 
 [dependencies]
 cidr-optimizer = { path = "../cidr-optimizer" }
