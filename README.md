@@ -75,6 +75,8 @@ docs/
 | `cargo build --release` | Optimized binary |
 | `cargo clippy` | Lint checks |
 
+A `Makefile` wraps these commands for convenience (`make build`, `make test`, `make test-stress`, `make test-all`, `make lint`, `make install`, `make clean`, `make publish`).
+
 ## Documentation
 
 - [Getting Started](docs/GETTING_STARTED.md) — Learn by doing with progressive scenarios
@@ -83,4 +85,4 @@ docs/
 
 ## License
 
-MIT
+[MIT](LICENSE)

@@ -104,6 +104,10 @@ cost = capacity(node) - coverage(node)
 
 4. **Greedy collapse loop**: Pop minimum-efficiency node, verify freshness via generation counter, check ratio cap, execute collapse (mark as leaf, invalidate descendants), update ancestors, push updated ancestors back into heap. Repeat until `entry_count ≤ target` or heap exhausted.
 
+**Dual-mode target specification**: The optimizer supports two target modes via `TargetSpec`:
+- `EntryCount(k)` — reduce to ≤k entries, optionally capped by a ratio. The loop terminates when `remaining ≤ k` or the ratio cap is hit.
+- `MaxOverCoverage(ratio)` — find the minimum entry count such that over-coverage stays ≤ ratio × covered IPs. Implemented by setting `target = 1` (theoretical floor) and passing the ratio as the cap. The loop terminates when the next collapse would exceed the ratio — the entry count floor is never reached in practice. This inverts the optimization: instead of "fit N entries with minimal waste," it solves "minimize entries subject to a waste budget."
+
 **Priority queue**: `BinaryHeap<Reverse<(EfficiencyKey, u32, u32)>>` — composite key `(efficiency, node_idx, generation)`. Ties broken by `node_idx` for determinism.
 
 **Staleness handling**: O(1) per pop via generation counter comparison. Total invalidation work is O(total_nodes) amortized across all collapses. When total heap size exceeds 4× the remaining entry count, the heap is compacted by filtering invalid entries.
@@ -252,12 +256,12 @@ crates/
 ├── cidr-optimizer/              Core library crate
 │   └── src/
 │       ├── lib.rs               Public API surface: optimize(), optimize_with_progress(),
-│       │                        optimize_from_reader(). Orchestrates the full pipeline
-│       │                        (partition → lossless → lossy → assemble). Owns the
-│       │                        coverage validation invariant.
-│       ├── types.rs             Public data types: OptimizerConfig, OptimizationResult,
-│       │                        AggregatedEntry, OptimizationStats, Phase, AddressFamily.
-│       │                        Pure data definitions with no logic.
+│       │                        optimize_from_reader(), validate_coverage(). Orchestrates
+│       │                        the full pipeline (partition → lossless → lossy → assemble).
+│       │                        Owns the coverage validation invariant.
+│       ├── types.rs             Public data types: OptimizerConfig, TargetSpec,
+│       │                        OptimizationResult, AggregatedEntry, OptimizationStats,
+│       │                        Phase, AddressFamily. Pure data definitions with no logic.
 │       ├── error.rs             Error enums: OptimizeError (library-level) and
 │       │                        OptimizerError (reader-level, includes parse/IO).
 │       │                        Implements From conversions between them.
