@@ -200,14 +200,16 @@ IPv4 over-coverage: 28456 IPs
 One CIDR prefix per line. Supports both IPv4 and IPv6:
 
 ```
-10.0.0.0/24
-192.168.1.0/25
+# CDN provider ranges
+10.0.0.0/24       # partner-A
+192.168.1.0/25    # ticket JIRA-1234
 2001:db8::/32
 192.168.1.1
 ```
 
 Rules:
-- Lines starting with `#` are comments (skipped)
+- Lines starting with `#` are full-line comments (skipped)
+- Text after `#` on a CIDR line is an inline comment (preserved in source-map output)
 - Blank lines are skipped
 - Bare IP addresses without a prefix length are treated as host addresses (`/32` for IPv4, `/128` for IPv6)
 - Non-canonical CIDRs (host bits set) are normalized with a warning: `10.0.0.5/24` → `10.0.0.0/24`
