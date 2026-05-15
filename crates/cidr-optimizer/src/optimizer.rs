@@ -24,9 +24,9 @@ impl PartialOrd for EfficiencyKey {
     }
 }
 
-/// Multiply u128 by u32, returning (high_u32, low_u128) for exact 160-bit comparison.
+/// Multiply u128 by u32, returning (high_u64, low_u128) for exact 160-bit comparison.
 #[inline]
-pub fn widening_mul_u128_u32(a: u128, b: u32) -> (u32, u128) {
+pub fn widening_mul_u128_u32(a: u128, b: u32) -> (u64, u128) {
     let a_lo = a as u64 as u128;
     let a_hi = a >> 64;
     let b = b as u128;
@@ -35,7 +35,7 @@ pub fn widening_mul_u128_u32(a: u128, b: u32) -> (u32, u128) {
     let prod_hi = a_hi * b;
 
     let (low, carry) = prod_lo.overflowing_add(prod_hi << 64);
-    let high = (prod_hi >> 64) as u32 + carry as u32;
+    let high = (prod_hi >> 64) as u64 + carry as u64;
     (high, low)
 }
 
@@ -74,6 +74,11 @@ pub fn optimize_trie(
     while remaining > target {
         let Some(Reverse((_eff, node_idx, gen))) = heap.pop() else { break };
 
+        // Bounds check: skip corrupted/invalid entries
+        if node_idx as usize >= trie.arena.len() {
+            continue;
+        }
+
         let node = &trie.arena[node_idx as usize];
         if node.is_leaf || node.generation != gen {
             // Heap compaction when stale entries dominate
@@ -83,8 +88,11 @@ pub fn optimize_trie(
                     heap.into_vec()
                         .into_iter()
                         .filter(|Reverse((_, idx, g))| {
-                            let n = &arena[*idx as usize];
-                            !n.is_leaf && n.generation == *g
+                            let i = *idx as usize;
+                            i < arena.len() && {
+                                let n = &arena[i];
+                                !n.is_leaf && n.generation == *g
+                            }
                         })
                         .collect::<Vec<_>>(),
                 );

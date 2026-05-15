@@ -14,9 +14,15 @@ pub struct ParsedInput {
     pub parse_warnings: Vec<(usize, String)>,
 }
 
+/// Maximum bytes per line to prevent OOM from single-line attacks.
+const MAX_LINE_BYTES: usize = 4096;
+
+/// Maximum number of parse warnings to retain.
+const MAX_WARNINGS: usize = 1000;
+
 /// Parse input lines into partitioned IPv4/IPv6 prefix vectors with indices.
 pub fn parse_input(
-    input: impl BufRead,
+    mut input: impl BufRead,
     store_strings: bool,
     max_entries: usize,
 ) -> Result<ParsedInput, OptimizerError> {
@@ -25,13 +31,26 @@ pub fn parse_input(
     let mut original_strings = Vec::new();
     let mut warnings = Vec::new();
     let mut entry_index: usize = 0;
+    let mut line_num: usize = 0;
+    let mut line_buf = String::new();
 
-    for (line_num, line_result) in input.lines().enumerate() {
-        let line = line_result?;
-        let trimmed = line.trim();
+    loop {
+        line_buf.clear();
+        let bytes_read = input.read_line(&mut line_buf)?;
+        if bytes_read == 0 {
+            break;
+        }
+        if line_buf.len() > MAX_LINE_BYTES {
+            return Err(OptimizerError::Parse {
+                line: line_num + 1,
+                message: format!("line exceeds {} byte limit", MAX_LINE_BYTES),
+            });
+        }
+        let trimmed = line_buf.trim();
 
         // Skip comments and blank lines
         if trimmed.is_empty() || trimmed.starts_with('#') {
+            line_num += 1;
             continue;
         }
 
@@ -69,7 +88,7 @@ pub fn parse_input(
                 match net {
                     ipnet::IpNet::V4(v4) => {
                         let truncated = v4.trunc();
-                        if truncated != v4 {
+                        if truncated != v4 && warnings.len() < MAX_WARNINGS {
                             warnings.push((
                                 line_num + 1,
                                 format!("non-canonical CIDR '{}' normalized to '{}'", v4, truncated),
@@ -79,7 +98,7 @@ pub fn parse_input(
                     }
                     ipnet::IpNet::V6(v6) => {
                         let truncated = v6.trunc();
-                        if truncated != v6 {
+                        if truncated != v6 && warnings.len() < MAX_WARNINGS {
                             warnings.push((
                                 line_num + 1,
                                 format!("non-canonical CIDR '{}' normalized to '{}'", v6, truncated),
@@ -93,10 +112,11 @@ pub fn parse_input(
             Err(_) => {
                 return Err(OptimizerError::Parse {
                     line: line_num + 1,
-                    message: format!("invalid IP or CIDR: '{}'", trimmed),
+                    message: format!("invalid IP or CIDR: '{}'", &trimmed[..trimmed.len().min(100)]),
                 });
             }
         }
+        line_num += 1;
     }
 
     Ok(ParsedInput {

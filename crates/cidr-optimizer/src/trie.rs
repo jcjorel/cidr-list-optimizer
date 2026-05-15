@@ -87,12 +87,15 @@ impl BinaryTrie {
     }
 
     pub fn invalidate_subtree(&mut self, node_idx: NodeIdx) {
-        let node = &self.arena[node_idx as usize];
-        let children = node.children;
-        for &child in &children {
-            if child != INVALID {
-                self.arena[child as usize].generation = self.arena[child as usize].generation.wrapping_add(1);
-                self.invalidate_subtree(child);
+        let mut stack = vec![node_idx];
+        while let Some(idx) = stack.pop() {
+            let children = self.arena[idx as usize].children;
+            for &child in &children {
+                if child != INVALID {
+                    self.arena[child as usize].generation =
+                        self.arena[child as usize].generation.wrapping_add(1);
+                    stack.push(child);
+                }
             }
         }
     }
