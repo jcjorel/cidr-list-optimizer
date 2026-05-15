@@ -3,6 +3,12 @@ name = "cidr-optimizer-cli"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.93"
+description = "CLI for cidr-optimizer: fit oversized IP allow-lists into AWS entry limits"
+license = "MIT"
+repository = "https://github.com/jcjorel/cidr-list-optimizer"
+readme = "../../README.md"
+keywords = ["cidr", "ip", "networking", "aws", "cli"]
+categories = ["network-programming", "command-line-utilities"]
 
 [[bin]]
 name = "cidr-optimizer"
