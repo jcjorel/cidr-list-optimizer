@@ -1,6 +1,6 @@
 ---
 name: project-documentation-mandatory-guidelines
-description: Prevents content duplication and misplacement across project documentation files. Use when reading, writing, creating, improving or reviewing README.md, docs/ARCHITECTURE.md, docs/USER_GUIDE.md, or docs/GETTING_STARTED.md. Do NOT use for general documentation writing.
+description: Prevents content duplication and misplacement across project documentation files. Use when reading, writing, creating, improving or reviewing README.md, docs/ARCHITECTURE.md, docs/USER_GUIDE.md, docs/GETTING_STARTED.md, or docs/DEVELOPER_API.md. Do NOT use for general documentation writing.
 ---
 
 The keywords MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT, RECOMMENDED, NOT RECOMMENDED, MAY, and OPTIONAL in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174).
@@ -9,7 +9,7 @@ A fact MUST appear in at most ONE file; cross-reference links replace repetition
 
 ## Scope
 
-This skill governs ONLY the 4 files listed in the File Ownership Zones table. Content that does not belong to any zone (e.g., CONTRIBUTING.md, LICENSE, benchmarks/) is OUT OF SCOPE — proceed without applying these rules.
+This skill governs ONLY the 5 files listed in the File Ownership Zones table. Content that does not belong to any zone (e.g., CONTRIBUTING.md, LICENSE, benchmarks/) is OUT OF SCOPE — proceed without applying these rules.
 
 ## Duplication Taxonomy
 
@@ -22,7 +22,7 @@ This skill governs ONLY the 4 files listed in the File Ownership Zones table. Co
 
 ## Disambiguation Principle
 
-When in doubt about which file owns content, apply: "Is this answering WHY (→ ARCHITECTURE), HOW-TO-USE (→ USER_GUIDE), LEARN-BY-DOING (→ GETTING_STARTED), or WHAT-IS-THIS-PROJECT (→ README)?" Place the authoritative definition in the primary owner; use contextual echoes (≤1 sentence + link) in secondary files.
+When in doubt about which file owns content, apply: "Is this answering WHY (→ ARCHITECTURE), HOW-TO-USE-CLI (→ USER_GUIDE), HOW-TO-INTEGRATE-AS-LIBRARY (→ DEVELOPER_API), LEARN-BY-DOING (→ GETTING_STARTED), or WHAT-IS-THIS-PROJECT (→ README)?" Place the authoritative definition in the primary owner; use contextual echoes (≤1 sentence + link) in secondary files.
 
 ## Procedure Selection
 
@@ -40,7 +40,7 @@ When in doubt about which file owns content, apply: "Is this answering WHY (→ 
 ## Bootstrap Procedure
 
 1. MUST create `docs/` directory if it does not exist.
-2. MUST create files in this order: README.md first, then docs/ARCHITECTURE.md, docs/USER_GUIDE.md, docs/GETTING_STARTED.md.
+2. MUST create files in this order: README.md first, then docs/ARCHITECTURE.md, docs/USER_GUIDE.md, docs/DEVELOPER_API.md, docs/GETTING_STARTED.md.
 3. Each file MUST contain at minimum: headings corresponding to its MUST CONTAIN items from the ownership table.
 4. Cross-reference links MUST only point to files that already exist. When a new governed file is created, previously created files MUST be updated to include the link.
 5. MUST apply the Enforcement Procedure rules to all content written during bootstrap.
@@ -52,13 +52,20 @@ When in doubt about which file owns content, apply: "Is this answering WHY (→ 
 | README → other docs | MUST link to all docs that currently exist in a "Documentation" section at the bottom |
 | GETTING_STARTED.md → README | MAY reference for install prerequisites |
 | GETTING_STARTED.md → USER_GUIDE.md | MUST link for full CLI/API details instead of duplicating |
+| GETTING_STARTED.md → DEVELOPER_API.md | MAY link for library integration details |
 | GETTING_STARTED.md → ARCHITECTURE.md | MAY link for "how the algorithm works" explanations |
 | ARCHITECTURE.md → README | MUST NOT link back |
 | ARCHITECTURE.md → USER_GUIDE.md | MAY reference for "how to configure" details |
+| ARCHITECTURE.md → DEVELOPER_API.md | MAY reference for public API surface |
 | ARCHITECTURE.md → GETTING_STARTED.md | MAY reference for "see tutorial" pointers |
 | USER_GUIDE.md → README | MUST NOT link back |
 | USER_GUIDE.md → ARCHITECTURE.md | MAY reference for "why it works this way" explanations |
+| USER_GUIDE.md → DEVELOPER_API.md | MUST link for library API reference instead of duplicating; MUST include contextual links from CLI feature sections to equivalent library usage for users wanting to reimplement CLI commands from their application |
 | USER_GUIDE.md → GETTING_STARTED.md | MAY reference for "see tutorial" pointers |
+| DEVELOPER_API.md → README | MUST NOT link back |
+| DEVELOPER_API.md → ARCHITECTURE.md | MAY reference for algorithm internals and design rationale |
+| DEVELOPER_API.md → USER_GUIDE.md | MAY reference for CLI-equivalent behavior |
+| DEVELOPER_API.md → GETTING_STARTED.md | MAY reference for "see tutorial" pointers |
 
 ## File Ownership Zones
 
@@ -67,7 +74,8 @@ When in doubt about which file owns content, apply: "Is this answering WHY (→ 
 | `README.md` | Why and How to Start | Value proposition; feature bullet list (one-liner each, no impl details); prerequisites (Rust toolchain version, MSRV); install commands (`cargo install`); minimal usage example (one lossless, one budget); performance summary table (benchmark numbers only, no actionable recommendations); project structure tree (flat listing, ≤8-word noun phrase per entry, no verbs or behavior descriptions); build/test command table; links to other docs | Algorithm internals (trie, greedy, radix sort); full CLI flag reference; library API signatures; output format JSON schemas; complexity analysis; memory budget tables; configuration parameter details; step-by-step tutorials; performance tuning recommendations; module responsibility descriptions |
 | `docs/GETTING_STARTED.md` | Learn by Doing | Progressive scenarios (lossless aggregation, IPv4 budget mode, IPv6 budget mode, mixed AF, source-map inspection, ratio-capped mode, AWS output format, stdin piping); each scenario with goal statement, complete runnable command, sample input file content, expected output, and "what just happened" explanation (≤2 sentences for source-map/error scenarios, linking to USER_GUIDE for full details); prerequisite checklist referencing README install steps | Value proposition / feature overview; algorithm internals; full CLI reference (link to User Guide instead); library API reference; complexity analysis; memory budget; architectural decisions; error type catalogs or exhaustive error handling guidance; complete output format schemas; configuration parameter tables; generic source-map field definitions |
 | `docs/ARCHITECTURE.md` | How It Works Inside | System diagram (ASCII/Mermaid showing phases); algorithm phases (parse, radix sort, lossless aggregation, path-compressed trie, greedy lossy optimization); data structures (trie node layout, arena allocation, BinaryHeap entry); complexity analysis table; memory budget table; cost-efficiency greedy rationale; path compression explanation; over-coverage tracking math; ratio check integer arithmetic; correctness argument; references to academic papers; crate structure with module responsibilities (complete sentences explaining what each module DOES, interface boundaries, and relationships); mathematical model behind configuration parameters (without listing defaults or valid ranges) | Value proposition; install commands; CLI flag reference; output format examples; step-by-step tutorials; library API usage examples; parameter default values or valid ranges; CLI usage examples; output format schemas; benchmark numbers or performance measurements |
-| `docs/USER_GUIDE.md` | How to Use It Day-to-Day | Full CLI reference (all flags with descriptions and defaults); library API reference (`optimize`, `optimize_with_progress`, `optimize_from_reader` with signatures and usage); `OptimizerConfig` fields table (type, default, valid range, behavioral effect — no mathematical rationale); `Phase` and `AddressFamily` enum documentation for progress callbacks; output formats (plain, JSON, AWS) with full schema examples; error types (`OptimizeError`, `OptimizerError`) and handling; source-map output interpretation (generic field definitions, all possible values, production usage patterns); `--validate` flag behavior; `--stats` output format; integration patterns (as library dependency, as CLI in scripts, in CI/CD pipelines); performance tuning tips (actionable guidance, recommended values, tradeoff advice) | Value proposition; install commands; algorithm internals (trie structure, greedy math); complexity proofs; academic references; step-by-step tutorials; module dependency diagrams; data structure memory layouts; benchmark numbers |
+| `docs/USER_GUIDE.md` | How to Use It Day-to-Day | Full CLI reference (all flags with descriptions and defaults); output formats (plain, JSON, AWS) with full schema examples; source-map output interpretation (generic field definitions, all possible values, production usage patterns); `--stats` output format; integration patterns (as CLI in scripts, in CI/CD pipelines); performance tuning tips (actionable guidance, recommended values, tradeoff advice) | Value proposition; install commands; algorithm internals (trie structure, greedy math); complexity proofs; academic references; step-by-step tutorials; module dependency diagrams; data structure memory layouts; benchmark numbers; library API signatures; `OptimizerConfig` builder pattern; `Phase`/`AddressFamily` enum documentation; `OptimizeError`/`OptimizerError` type definitions; library integration examples; feature flags |
+| `docs/DEVELOPER_API.md` | Library Crate Integration Reference | Public API signatures (`optimize`, `optimize_with_progress`, `optimize_from_reader`); `OptimizerConfig` builder pattern and field documentation (type, default, valid range, behavioral effect — no mathematical rationale); `Phase` and `AddressFamily` enum documentation for progress callbacks; `OptimizeError` / `OptimizerError` types and handling patterns; `Cargo.toml` dependency snippet; complete integration examples (as library dependency, progress reporting, custom error handling); feature flags documentation; MSRV for library consumers; re-export structure and module visibility | CLI flags or CLI usage; algorithm internals (trie, greedy, radix sort); value proposition / feature overview; step-by-step tutorials; output format schemas for CLI; performance tuning tips for CLI users; install commands for the binary; architectural decisions or complexity analysis |
 
 ## Documentation Review Procedure
 
@@ -82,6 +90,7 @@ git log -1 --format="%aI %H" -- README.md
 git log -1 --format="%aI %H" -- docs/GETTING_STARTED.md
 git log -1 --format="%aI %H" -- docs/ARCHITECTURE.md
 git log -1 --format="%aI %H" -- docs/USER_GUIDE.md
+git log -1 --format="%aI %H" -- docs/DEVELOPER_API.md
 ```
 
 2. If any command returns empty (file not yet committed or no git history), set `{LAST_MODIFIED}` for that file to "File has never been committed." If the repository has no commits at all, SKIP the Change Discovery pre-step entirely and proceed with a full review using `{RECENT_CHANGES}` = "No git history available — treating all content as new."
@@ -110,7 +119,7 @@ git diff --stat $(git log -1 --format=%H --before="{SINCE_DATE}")..HEAD -- . ':!
 
 MUST spawn parallel subagents using the `subagent` tool with mode `blocking`. MUST NOT review files sequentially in the main agent context.
 
-MUST use five parallel stages with no dependencies between them. MUST skip stages for files that do not exist.
+MUST use six parallel stages with no dependencies between them. MUST skip stages for files that do not exist.
 
 | Stage name | File | Role (from ownership table) |
 |------------|------|----------------------------|
@@ -118,6 +127,7 @@ MUST use five parallel stages with no dependencies between them. MUST skip stage
 | getting-started-review | docs/GETTING_STARTED.md | Learn by Doing |
 | architecture-review | docs/ARCHITECTURE.md | How It Works Inside |
 | user-guide-review | docs/USER_GUIDE.md | How to Use It Day-to-Day |
+| developer-api-review | docs/DEVELOPER_API.md | Library Crate Integration Reference |
 | link-validation | All existing doc files | Cross-reference integrity |
 
 ### Per-File Review Prompt
@@ -159,6 +169,7 @@ Read ALL existing documentation files from:
 - docs/GETTING_STARTED.md
 - docs/ARCHITECTURE.md
 - docs/USER_GUIDE.md
+- docs/DEVELOPER_API.md
 
 (Skip any that do not exist.)
 

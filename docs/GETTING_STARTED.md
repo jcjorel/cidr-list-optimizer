@@ -73,7 +73,7 @@ IPv6: 0 input → 0 output (compression: 1.0x)
 IPv4 over-coverage: 1024 IPs
 ```
 
-What happened: With a target of 4, the optimizer merged non-adjacent prefixes into wider CIDRs, accepting some over-coverage (IPs not in the original input that are now included). See [User Guide — `--max-over-coverage` Behavior](USER_GUIDE.md#--max-over-coverage-behavior) for how the default cap works.
+What happened: With a target of 4, the optimizer merged non-adjacent prefixes into wider CIDRs, accepting some over-coverage (IPs not in the original input that are now included). Validation is automatic — the library always verifies that every input prefix is covered by at least one output prefix before returning results. See [User Guide — `--max-over-coverage` Behavior](USER_GUIDE.md#--max-over-coverage-behavior) for how the default cap works.
 
 ## Scenario 3: IPv6 Budget Mode
 
@@ -216,25 +216,7 @@ cidr-optimizer --ipv4-target 1 --max-over-coverage -1 large-feed.txt
 
 This disables the cap entirely, allowing the optimizer to merge as aggressively as needed.
 
-## Scenario 7: Validation
-
-**Goal**: Verify that optimization didn't lose coverage (safety check for CI/CD).
-
-Using the same `large-feed.txt` from Scenario 2:
-
-```bash
-cidr-optimizer --ipv4-target 4 --validate large-feed.txt
-```
-
-Expected output (stderr):
-
-```
-Validation passed: all inputs covered
-```
-
-What happened: The `--validate` flag performs an independent verification that every input prefix is contained by at least one output prefix. Exits with code 1 if coverage is lost (indicates a bug). Useful as a CI gate.
-
-## Scenario 8: AWS Output Format
+## Scenario 7: AWS Output Format
 
 **Goal**: Generate output ready for AWS CLI consumption.
 
@@ -265,7 +247,7 @@ cidr-optimizer --ipv4-target 1000 --format aws feed.txt \
       --add-entries file:///dev/stdin
 ```
 
-## Scenario 9: Stdin Piping
+## Scenario 8: Stdin Piping
 
 **Goal**: Process input from a pipeline without intermediate files.
 
@@ -292,5 +274,6 @@ What happened: When no file argument is given (or `-` is passed explicitly), the
 
 ## Next Steps
 
-- [User Guide](USER_GUIDE.md) — Full CLI flag reference, library API, and all configuration options
+- [User Guide](USER_GUIDE.md) — Full CLI flag reference and all configuration options
+- [Developer API](DEVELOPER_API.md) — Library crate integration reference
 - [Architecture](ARCHITECTURE.md) — How the algorithm works internally

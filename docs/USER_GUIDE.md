@@ -51,150 +51,19 @@ When the cap is reached before the target, merging stops early. If the resulting
 error: --max-over-coverage cannot be used with over-coverage=X% target syntax
 ```
 
+For programmatic control of these parameters, see [Developer API — OptimizerConfig Fields](DEVELOPER_API.md#optimizerconfig-fields).
+
+## Coverage Validation
+
+Coverage validation is always performed automatically. The library verifies that every input prefix is covered by at least one output prefix before returning results. If validation fails, the CLI exits with code 1 (indicates a bug — please report it).
+
 ## Library API
 
-### Primary Functions
-
-```rust
-use cidr_optimizer::{optimize, optimize_with_progress, optimize_from_reader};
-use cidr_optimizer::{OptimizerConfig, OptimizationResult, Phase};
-use ipnet::IpNet;
-use std::ops::ControlFlow;
-
-// From pre-parsed prefixes
-let result = optimize(&prefixes, &config)?;
-
-// With progress/cancellation
-let result = optimize_with_progress(&prefixes, &config, |phase| {
-    match phase {
-        Phase::Lossy { current_count, target, .. } => {
-            println!("Reducing: {} → {}", current_count, target);
-        }
-        Phase::Done => println!("Complete"),
-        _ => {}
-    }
-    ControlFlow::Continue(())  // Return Break(()) to cancel
-})?;
-
-// From a reader (parses internally)
-let result = optimize_from_reader(reader, &config)?;
-```
-
-### `TargetSpec` Enum
-
-Specifies how the optimization target is defined per address family:
-
-```rust
-pub enum TargetSpec {
-    /// Fixed entry count target — reduce to at most N entries.
-    EntryCount(usize),
-    /// Find minimum entries keeping over-coverage ≤ ratio (e.g., 0.001 for 0.1%).
-    MaxOverCoverage(f64),
-}
-```
-
-The CLI parses `--ipv4-target` / `--ipv6-target` strings into `TargetSpec`:
-- Integer (e.g. `"60"`) → `TargetSpec::EntryCount(60)`
-- `"over-coverage=X%"` (e.g. `"over-coverage=0.1%"`) → `TargetSpec::MaxOverCoverage(0.001)`
-
-### `OptimizerConfig` Fields
-
-| Field | Type | Default | Valid Range | Effect |
-|-------|------|---------|-------------|--------|
-| `ipv4_target` | `Option<TargetSpec>` | `None` | — | IPv4 optimization target. `None` = lossless |
-| `ipv6_target` | `Option<TargetSpec>` | `None` | — | IPv6 optimization target. `None` = lossless |
-| `max_over_coverage_ratio` | `Option<f64>` | `None` | 0.0..=10.0 | Ratio cap (1.0 = 100%). `None` = no cap |
-| `max_prefix_len_v4` | `u8` | `32` | 1..=32 | Longest IPv4 prefix in output |
-| `max_prefix_len_v6` | `u8` | `128` | 1..=128 | Longest IPv6 prefix in output |
-| `max_input_entries` | `usize` | `10_000_000` | 1..=∞ | Input size bound |
-| `source_map` | `bool` | `false` | — | Track which inputs map to each output |
-
-### `Phase` Enum (Progress Callbacks)
-
-```rust
-pub enum Phase {
-    Parsing { entries_read: usize },
-    Lossless { af: AddressFamily, entries_remaining: usize },
-    Lossy { af: AddressFamily, current_count: usize, target: usize },
-    Done,
-}
-
-pub enum AddressFamily { IPv4, IPv6 }
-```
-
-Progress callbacks receive `Phase` values at each stage transition. Return `ControlFlow::Break(())` from the callback to cancel optimization (returns `OptimizeError::Cancelled`).
-
-### `OptimizationResult`
-
-```rust
-pub struct OptimizationResult {
-    pub entries: Vec<AggregatedEntry>,
-    pub stats: OptimizationStats,
-}
-
-pub struct AggregatedEntry {
-    pub prefix: IpNet,
-    pub source_indices: Option<Vec<usize>>,  // None if source_map disabled
-    pub over_coverage: u128,
-}
-
-pub struct OptimizationStats {
-    pub input_ipv4_count: usize,
-    pub input_ipv6_count: usize,
-    pub output_ipv4_count: usize,
-    pub output_ipv6_count: usize,
-    pub total_ipv4_over_coverage: u128,
-    pub total_ipv6_over_coverage: u128,
-    pub ipv4_compression_ratio: f64,
-    pub ipv6_compression_ratio: f64,
-    pub ipv4_target_binding: bool,   // true if lossless exceeded target
-    pub ipv6_target_binding: bool,
-}
-```
-
-## Error Types
-
-### `OptimizeError` (from `optimize` / `optimize_with_progress`)
-
-| Variant | Meaning |
-|---------|---------|
-| `EmptyInput` | No valid prefixes in input |
-| `InvalidConfig { message }` | Configuration parameter out of valid range |
-| `TargetTooSmall { target, minimum }` | Target is 0 but AF has entries |
-| `InputTooLarge { count, limit }` | Input exceeds `max_input_entries` |
-| `ArenaOverflow` | Trie exceeds u32::MAX nodes |
-| `Cancelled` | Progress callback returned `Break(())` |
-| `CoverageLost` | Internal invariant violation (bug) |
-
-### `OptimizerError` (from `optimize_from_reader`)
-
-| Variant | Meaning |
-|---------|---------|
-| `Optimize(OptimizeError)` | Wraps any `OptimizeError` |
-| `Parse { line, message }` | Invalid input at specific line |
-| `Io(std::io::Error)` | I/O failure reading input |
-
-### Error Handling Pattern
-
-```rust
-use cidr_optimizer::{optimize_from_reader, OptimizerError, OptimizeError};
-
-match optimize_from_reader(reader, &config) {
-    Ok(result) => { /* use result */ }
-    Err(OptimizerError::Optimize(OptimizeError::Cancelled)) => {
-        eprintln!("Optimization cancelled by user");
-    }
-    Err(OptimizerError::Optimize(OptimizeError::InputTooLarge { count, limit })) => {
-        eprintln!("Input has {} entries, limit is {}", count, limit);
-    }
-    Err(OptimizerError::Parse { line, message }) => {
-        eprintln!("Parse error at line {}: {}", line, message);
-    }
-    Err(e) => eprintln!("Error: {}", e),
-}
-```
+For library integration (using `cidr-optimizer` as a Rust dependency), see the [Developer API Reference](DEVELOPER_API.md) which covers `OptimizerConfig`, progress callbacks, error handling, and complete integration examples.
 
 ## Output Formats
+
+For programmatic access to these data structures (`OptimizationResult`, `AggregatedEntry`, `OptimizationStats`), see [Developer API — Result Types](DEVELOPER_API.md#result-types).
 
 ### Plain (default)
 
@@ -252,7 +121,7 @@ Array suitable for `aws ec2 modify-managed-prefix-list --add-entries`:
 
 ## Source-Map File Format
 
-When `--source-map <FILE>` is specified, the detailed source mapping is written to the given file in JSON format (regardless of `--format`):
+When `--source-map <FILE>` is specified, the detailed source mapping is written to the given file in JSON format (regardless of `--format`). For programmatic access to source-map data, see [Developer API — AggregatedEntry](DEVELOPER_API.md#result-types).
 
 ```json
 {
@@ -345,55 +214,9 @@ Rules:
 - Maximum line length: 4096 bytes
 - Entry indices for source-map are assigned sequentially, counting only valid entries (not comments/blanks)
 
-## Additional Library API
-
-### `parser::parse_input`
-
-```rust
-pub fn parse_input(
-    input: impl BufRead,
-    store_strings: bool,
-    max_entries: usize,
-) -> Result<ParsedInput, OptimizerError>
-```
-
-Parses input into partitioned IPv4/IPv6 vectors with original indices. Set `store_strings = true` to retain original input strings (needed for source-map display). Returns `ParsedInput` with fields:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `ipv4` | `Vec<(usize, Ipv4Net)>` | Parsed IPv4 prefixes with original indices |
-| `ipv6` | `Vec<(usize, Ipv6Net)>` | Parsed IPv6 prefixes with original indices |
-| `original_strings` | `Vec<String>` | Original input lines (if `store_strings = true`) |
-| `total_entries` | `usize` | Total valid entries parsed |
-| `parse_warnings` | `Vec<(usize, String)>` | Non-fatal warnings (e.g., host bit truncation) |
-
-### `OptimizationStats` Fields
-
-See the `OptimizationStats` struct definition in [`OptimizationResult`](#optimizationresult) above for all fields and types.
-
 ## Integration Patterns
 
-### As a Library Dependency
-
-```toml
-[dependencies]
-cidr-optimizer = "1.0"
-```
-
-```rust
-use cidr_optimizer::{optimize, OptimizerConfig, TargetSpec};
-use ipnet::IpNet;
-
-let prefixes: Vec<IpNet> = parse_your_feed();
-let config = OptimizerConfig {
-    ipv4_target: Some(TargetSpec::EntryCount(1000)),
-    ..Default::default()
-};
-let result = optimize(&prefixes, &config)?;
-for entry in &result.entries {
-    apply_to_prefix_list(entry.prefix);
-}
-```
+For library integration (using `cidr-optimizer` as a Rust dependency), see the [Developer API Reference](DEVELOPER_API.md).
 
 ### As CLI in Scripts
 

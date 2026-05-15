@@ -61,8 +61,10 @@ crates/
   cidr-optimizer-cli/     CLI binary (thin wrapper)
 docs/
   ARCHITECTURE.md         Algorithm internals and design
-  USER_GUIDE.md           CLI/API reference and configuration
+  DEVELOPER_API.md        Library crate integration reference
+  USER_GUIDE.md           CLI reference and configuration
   GETTING_STARTED.md      Progressive tutorial scenarios
+CHANGELOG.md              Release history
 ```
 
 ## Build & Test
@@ -80,7 +82,8 @@ A `Makefile` wraps these commands for convenience (`make build`, `make test`, `m
 ## Documentation
 
 - [Getting Started](docs/GETTING_STARTED.md) — Learn by doing with progressive scenarios
-- [User Guide](docs/USER_GUIDE.md) — Full CLI reference, library API, and configuration
+- [User Guide](docs/USER_GUIDE.md) — Full CLI reference and configuration
+- [Developer API](docs/DEVELOPER_API.md) — Library crate integration reference
 - [Architecture](docs/ARCHITECTURE.md) — Algorithm design, data structures, and correctness arguments
 - [Changelog](CHANGELOG.md) — Release history
 

@@ -267,7 +267,9 @@ crates/
 │       │                        Implements From conversions between them.
 │       ├── parser.rs            Line-by-line input parsing with index assignment.
 │       │                        Handles comments, blank lines, normalization warnings.
-│       │                        Returns partitioned IPv4/IPv6 vectors.
+│       │                        Collects input metadata (original text, inline comments)
+│       │                        when source-map is enabled. Enforces 4 KiB per-line
+│       │                        length limit. Returns partitioned IPv4/IPv6 vectors.
 │       ├── lossless.rs          Sort-based lossless aggregation: radix sort, redundancy
 │       │                        elimination (monotone stack), max_prefix_len enforcement,
 │       │                        and sibling merging with cascading. Operates on
@@ -289,11 +291,11 @@ crates/
     └── src/
         └── main.rs              Argument parsing (clap), input reading, config
                                  construction, output formatting (plain/JSON/AWS),
-                                 statistics display, and validation orchestration.
+                                 statistics display, and validation error handling.
                                  Contains no optimization logic.
 ```
 
-**Interface boundaries**: The CLI depends on the library's public API only (`optimize`, `optimize_from_reader`, `validate_coverage`, `OptimizerConfig`, result types). The library modules have a layered dependency: `lib.rs` → `lossless` → (radix sort internals); `lib.rs` → `trie` → `optimizer`; `lib.rs` → `source_map`. The `trie` and `optimizer` modules are decoupled — `optimizer` receives a `&mut BinaryTrie` and drives the greedy loop without knowing how the trie was constructed.
+**Interface boundaries**: The CLI depends on the library's public API only (`optimize`, `optimize_from_reader`, `OptimizerConfig`, result types). The library modules have a layered dependency: `lib.rs` → `lossless` → (radix sort internals); `lib.rs` → `trie` → `optimizer`; `lib.rs` → `source_map`. The `trie` and `optimizer` modules are decoupled — `optimizer` receives a `&mut BinaryTrie` and drives the greedy loop without knowing how the trie was constructed.
 
 ## References
 
