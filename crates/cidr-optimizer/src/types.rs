@@ -1,9 +1,18 @@
 use ipnet::IpNet;
 
+/// Specifies how the optimization target is defined per address family.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TargetSpec {
+    /// Fixed entry count target (existing behavior).
+    EntryCount(usize),
+    /// Find minimum entries keeping over-coverage ≤ ratio (e.g., 0.001 for 0.1%).
+    MaxOverCoverage(f64),
+}
+
 /// Configuration for the CIDR optimizer.
 pub struct OptimizerConfig {
-    pub ipv4_target: Option<usize>,
-    pub ipv6_target: Option<usize>,
+    pub ipv4_target: Option<TargetSpec>,
+    pub ipv6_target: Option<TargetSpec>,
     pub max_over_coverage_ratio: Option<f64>,
     pub max_prefix_len_v4: u8,
     pub max_prefix_len_v6: u8,
@@ -71,8 +80,8 @@ mod tests {
     #[test]
     fn default_config_values() {
         let cfg = OptimizerConfig::default();
-        assert_eq!(cfg.ipv4_target, None);
-        assert_eq!(cfg.ipv6_target, None);
+        assert_eq!(cfg.ipv4_target, None::<TargetSpec>);
+        assert_eq!(cfg.ipv6_target, None::<TargetSpec>);
         assert_eq!(cfg.max_over_coverage_ratio, None);
         assert_eq!(cfg.max_prefix_len_v4, 32);
         assert_eq!(cfg.max_prefix_len_v6, 128);

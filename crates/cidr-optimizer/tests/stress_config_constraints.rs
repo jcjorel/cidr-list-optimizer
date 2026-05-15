@@ -3,7 +3,7 @@ mod common;
 use std::net::Ipv4Addr;
 use std::ops::ControlFlow;
 
-use cidr_optimizer::{optimize, optimize_with_progress, validate_coverage, OptimizerConfig, OptimizeError, Phase};
+use cidr_optimizer::{optimize, optimize_with_progress, validate_coverage, OptimizerConfig, OptimizeError, Phase, TargetSpec};
 use ipnet::{IpNet, Ipv4Net};
 
 use common::{generate_contiguous_v4, time_it};
@@ -22,7 +22,7 @@ fn generate_spaced_v4_stride(count: u32, stride: u64) -> Vec<IpNet> {
 fn run_ratio_cap(count: u32, stride: u64, label: &str) {
     let input = generate_spaced_v4_stride(count, stride);
     let config = OptimizerConfig {
-        ipv4_target: Some(10),
+        ipv4_target: Some(TargetSpec::EntryCount(10)),
         max_over_coverage_ratio: Some(0.01),
         ..Default::default()
     };
@@ -115,7 +115,7 @@ fn generate_nonadjacent_v4(count: u32) -> Vec<IpNet> {
 fn run_cancellation(count: u32, label: &str) {
     let input = generate_nonadjacent_v4(count);
     let config = OptimizerConfig {
-        ipv4_target: Some(10),
+        ipv4_target: Some(TargetSpec::EntryCount(10)),
         max_over_coverage_ratio: None,
         ..Default::default()
     };

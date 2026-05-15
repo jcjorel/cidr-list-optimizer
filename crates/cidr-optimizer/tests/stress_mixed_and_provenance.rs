@@ -3,7 +3,7 @@ mod common;
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use cidr_optimizer::{optimize, validate_coverage, OptimizerConfig};
+use cidr_optimizer::{optimize, validate_coverage, OptimizerConfig, TargetSpec};
 use ipnet::IpNet;
 
 use common::{generate_contiguous_v4, generate_contiguous_v6, time_it};
@@ -63,7 +63,7 @@ fn test_1m_mixed_provenance() {
 fn run_provenance_completeness(n: u32, label: &str) {
     let input = generate_contiguous_v4(Ipv4Addr::new(10, 0, 0, 0), n);
     let config = OptimizerConfig {
-        ipv4_target: Some(100),
+        ipv4_target: Some(TargetSpec::EntryCount(100)),
         provenance: true,
         max_over_coverage_ratio: None,
         ..Default::default()

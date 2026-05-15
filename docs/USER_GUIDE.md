@@ -16,9 +16,9 @@ cidr-optimizer [OPTIONS] [INPUT]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--ipv4-target <N>` | usize | None (lossless) | Maximum IPv4 output entries |
-| `--ipv6-target <N>` | usize | None (lossless) | Maximum IPv6 output entries |
-| `--max-over-coverage <PCT>` | f64 | 100 (when target set) | Maximum over-coverage percentage per AF. Use `-1` to disable |
+| `--ipv4-target <SPEC>` | String | None (lossless) | IPv4 target: integer entry count (e.g. `60`) or `over-coverage=X%` (e.g. `over-coverage=0.1%`) |
+| `--ipv6-target <SPEC>` | String | None (lossless) | IPv6 target: integer entry count (e.g. `60`) or `over-coverage=X%` (e.g. `over-coverage=0.1%`) |
+| `--max-over-coverage <PCT>` | f64 | 100 (when target set) | Maximum over-coverage percentage per AF. Use `-1` to disable. **Cannot** be combined with `over-coverage=X%` target syntax |
 | `--max-prefix-len-v4 <N>` | u8 | 32 | Maximum output prefix length for IPv4 |
 | `--max-prefix-len-v6 <N>` | u8 | 128 | Maximum output prefix length for IPv6 |
 | `--max-input-entries <N>` | usize | 10,000,000 | Maximum input entries before error |
@@ -39,12 +39,18 @@ cidr-optimizer [OPTIONS] [INPUT]
 
 The value is a **percentage** (not a ratio):
 - `--max-over-coverage 5` → cap at 5% over-coverage per AF
-- `--max-over-coverage 100` → cap at 100% (default when any target is set)
+- `--max-over-coverage 100` → cap at 100% (default when any entry-count target is set)
 - `--max-over-coverage 1000` → cap at 1000% (maximum allowed value)
 - `--max-over-coverage -1` → disable cap entirely (merge as aggressively as needed)
 - Omitted with no target → no cap (lossless mode has zero over-coverage)
 
 When the cap is reached before the target, merging stops early. If the resulting entry count still exceeds the target, the CLI exits with code 2 and a hint to raise the cap.
+
+**Conflict rule**: `--max-over-coverage` cannot be used together with `over-coverage=X%` target syntax (they express the same constraint differently). If both are specified, the CLI exits with an error:
+
+```
+error: --max-over-coverage cannot be used with over-coverage=X% target syntax
+```
 
 ## Library API
 
@@ -75,12 +81,29 @@ let result = optimize_with_progress(&prefixes, &config, |phase| {
 let result = optimize_from_reader(reader, &config)?;
 ```
 
+### `TargetSpec` Enum
+
+Specifies how the optimization target is defined per address family:
+
+```rust
+pub enum TargetSpec {
+    /// Fixed entry count target — reduce to at most N entries.
+    EntryCount(usize),
+    /// Find minimum entries keeping over-coverage ≤ ratio (e.g., 0.001 for 0.1%).
+    MaxOverCoverage(f64),
+}
+```
+
+The CLI parses `--ipv4-target` / `--ipv6-target` strings into `TargetSpec`:
+- Integer (e.g. `"60"`) → `TargetSpec::EntryCount(60)`
+- `"over-coverage=X%"` (e.g. `"over-coverage=0.1%"`) → `TargetSpec::MaxOverCoverage(0.001)`
+
 ### `OptimizerConfig` Fields
 
 | Field | Type | Default | Valid Range | Effect |
 |-------|------|---------|-------------|--------|
-| `ipv4_target` | `Option<usize>` | `None` | 1..=∞ | Max IPv4 output entries. `None` = lossless |
-| `ipv6_target` | `Option<usize>` | `None` | 1..=∞ | Max IPv6 output entries. `None` = lossless |
+| `ipv4_target` | `Option<TargetSpec>` | `None` | — | IPv4 optimization target. `None` = lossless |
+| `ipv6_target` | `Option<TargetSpec>` | `None` | — | IPv6 optimization target. `None` = lossless |
 | `max_over_coverage_ratio` | `Option<f64>` | `None` | 0.0..=10.0 | Ratio cap (1.0 = 100%). `None` = no cap |
 | `max_prefix_len_v4` | `u8` | `32` | 1..=32 | Longest IPv4 prefix in output |
 | `max_prefix_len_v6` | `u8` | `128` | 1..=128 | Longest IPv6 prefix in output |
@@ -342,16 +365,16 @@ Parses input into partitioned IPv4/IPv6 vectors with original indices. Set `stor
 
 ```toml
 [dependencies]
-cidr-optimizer = { path = "crates/cidr-optimizer" }
+cidr-optimizer = "1.0"
 ```
 
 ```rust
-use cidr_optimizer::{optimize, OptimizerConfig};
+use cidr_optimizer::{optimize, OptimizerConfig, TargetSpec};
 use ipnet::IpNet;
 
 let prefixes: Vec<IpNet> = parse_your_feed();
 let config = OptimizerConfig {
-    ipv4_target: Some(1000),
+    ipv4_target: Some(TargetSpec::EntryCount(1000)),
     ..Default::default()
 };
 let result = optimize(&prefixes, &config)?;

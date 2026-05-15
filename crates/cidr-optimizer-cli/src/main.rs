@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
 
-use cidr_optimizer::{optimize, optimize_from_reader, validate_coverage, OptimizerConfig};
+use cidr_optimizer::{optimize, optimize_from_reader, validate_coverage, OptimizerConfig, TargetSpec};
 
 #[derive(Parser)]
 #[command(name = "cidr-optimizer")]
@@ -16,13 +16,13 @@ struct Cli {
     #[arg(default_value = "-")]
     input: String,
 
-    /// IPv4 target entry count (omit for lossless)
+    /// IPv4 target: entry count (e.g. "60") or over-coverage ratio (e.g. "over-coverage=0.1%")
     #[arg(long)]
-    ipv4_target: Option<usize>,
+    ipv4_target: Option<String>,
 
-    /// IPv6 target entry count (omit for lossless)
+    /// IPv6 target: entry count (e.g. "60") or over-coverage ratio (e.g. "over-coverage=0.1%")
     #[arg(long)]
-    ipv6_target: Option<usize>,
+    ipv6_target: Option<String>,
 
     /// Maximum over-coverage percentage per AF (0-1000%, or -1 to disable)
     #[arg(long, allow_negative_numbers = true)]
@@ -101,21 +101,48 @@ struct AwsEntry {
     cidr: String,
 }
 
+fn parse_target_spec(s: &str) -> Result<TargetSpec> {
+    if let Some(rest) = s.strip_prefix("over-coverage=") {
+        let rest = rest.strip_suffix('%')
+            .ok_or_else(|| anyhow::anyhow!("over-coverage value must end with '%', e.g. over-coverage=0.1%"))?;
+        let pct: f64 = rest.parse()
+            .map_err(|_| anyhow::anyhow!("invalid over-coverage percentage: '{}'", rest))?;
+        Ok(TargetSpec::MaxOverCoverage(pct / 100.0))
+    } else {
+        let n: usize = s.parse()
+            .map_err(|_| anyhow::anyhow!("invalid target: '{}' (expected integer or over-coverage=X%)", s))?;
+        Ok(TargetSpec::EntryCount(n))
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let ipv4_target = cli.ipv4_target.as_deref().map(parse_target_spec).transpose()?;
+    let ipv6_target = cli.ipv6_target.as_deref().map(parse_target_spec).transpose()?;
+
+    // Validate conflict: MaxOverCoverage target + --max-over-coverage
+    let has_over_coverage_target = matches!(ipv4_target, Some(TargetSpec::MaxOverCoverage(_)))
+        || matches!(ipv6_target, Some(TargetSpec::MaxOverCoverage(_)));
+    if has_over_coverage_target && cli.max_over_coverage.is_some() {
+        eprintln!("error: --max-over-coverage cannot be used with over-coverage=X% target syntax");
+        process::exit(1);
+    }
+
     // Convert percentage to ratio. -1 disables capping entirely.
-    // Default to 100% when a target is set without explicit value.
+    // Default to 100% when an EntryCount target is set without explicit value.
+    let has_entry_count_target = matches!(ipv4_target, Some(TargetSpec::EntryCount(_)))
+        || matches!(ipv6_target, Some(TargetSpec::EntryCount(_)));
     let effective_ratio = match cli.max_over_coverage {
         Some(-1.0) => None,
         Some(pct) => Some(pct / 100.0),
-        None if cli.ipv4_target.is_some() || cli.ipv6_target.is_some() => Some(1.0),
+        None if has_entry_count_target => Some(1.0),
         None => None,
     };
 
     let config = OptimizerConfig {
-        ipv4_target: cli.ipv4_target,
-        ipv6_target: cli.ipv6_target,
+        ipv4_target,
+        ipv6_target,
         max_over_coverage_ratio: effective_ratio,
         max_prefix_len_v4: cli.max_prefix_len_v4,
         max_prefix_len_v6: cli.max_prefix_len_v6,
@@ -157,8 +184,8 @@ fn main() -> Result<()> {
         optimize_from_reader(reader, &config)?
     };
 
-    // Fail hard if target was not met
-    if let Some(t) = cli.ipv4_target {
+    // Fail hard if EntryCount target was not met (not for MaxOverCoverage)
+    if let Some(TargetSpec::EntryCount(t)) = ipv4_target {
         if result.stats.output_ipv4_count > t {
             eprintln!(
                 "error: IPv4 target {} unreachable — got {} entries (over-coverage cap prevents further merging)\n\
@@ -168,7 +195,7 @@ fn main() -> Result<()> {
             process::exit(2);
         }
     }
-    if let Some(t) = cli.ipv6_target {
+    if let Some(TargetSpec::EntryCount(t)) = ipv6_target {
         if result.stats.output_ipv6_count > t {
             eprintln!(
                 "error: IPv6 target {} unreachable — got {} entries (over-coverage cap prevents further merging)\n\

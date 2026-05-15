@@ -1,4 +1,4 @@
-use cidr_optimizer::{optimize, validate_coverage, OptimizerConfig};
+use cidr_optimizer::{optimize, validate_coverage, OptimizerConfig, TargetSpec};
 use ipnet::IpNet;
 
 #[test]
@@ -23,7 +23,7 @@ fn lossy_optimization_covers_all_inputs() {
         "10.0.5.0/24".parse().unwrap(),
     ];
     let config = OptimizerConfig {
-        ipv4_target: Some(1),
+        ipv4_target: Some(TargetSpec::EntryCount(1)),
         ..Default::default()
     };
     let result = optimize(&prefixes, &config).unwrap();
@@ -43,7 +43,7 @@ fn optimize_does_not_return_error_on_coverage_loss() {
         "192.168.0.2/32".parse().unwrap(),
     ];
     let config = OptimizerConfig {
-        ipv4_target: Some(1),
+        ipv4_target: Some(TargetSpec::EntryCount(1)),
         ..Default::default()
     };
     // This succeeds even though aggressive lossy merging happens

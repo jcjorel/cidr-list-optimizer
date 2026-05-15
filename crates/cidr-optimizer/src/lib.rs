@@ -8,6 +8,7 @@ pub mod provenance;
 
 pub use types::{
     AddressFamily, AggregatedEntry, OptimizerConfig, OptimizationResult, OptimizationStats, Phase,
+    TargetSpec,
 };
 pub use error::{OptimizeError, OptimizerError};
 
@@ -47,13 +48,13 @@ pub fn optimize_with_progress(
         return Err(OptimizeError::EmptyInput);
     }
 
-    if let Some(t) = config.ipv4_target {
-        if t == 0 && !ipv4.is_empty() {
+    if let Some(TargetSpec::EntryCount(0)) = config.ipv4_target {
+        if !ipv4.is_empty() {
             return Err(OptimizeError::TargetTooSmall { target: 0, minimum: 1 });
         }
     }
-    if let Some(t) = config.ipv6_target {
-        if t == 0 && !ipv6.is_empty() {
+    if let Some(TargetSpec::EntryCount(0)) = config.ipv6_target {
+        if !ipv6.is_empty() {
             return Err(OptimizeError::TargetTooSmall { target: 0, minimum: 1 });
         }
     }
@@ -71,27 +72,41 @@ pub fn optimize_with_progress(
     }
     let lossless_v6 = lossless::lossless_aggregate_v6(ipv6, config.max_prefix_len_v6);
 
-    let ipv4_target_binding = config.ipv4_target.is_some_and(|t| lossless_v4.len() > t);
-    let ipv6_target_binding = config.ipv6_target.is_some_and(|t| lossless_v6.len() > t);
+    let ipv4_target_binding = matches!(config.ipv4_target, Some(TargetSpec::EntryCount(t)) if lossless_v4.len() > t);
+    let ipv6_target_binding = matches!(config.ipv6_target, Some(TargetSpec::EntryCount(t)) if lossless_v6.len() > t);
 
     let output_v4 = match config.ipv4_target {
-        Some(target) if lossless_v4.len() > target => {
+        Some(TargetSpec::EntryCount(target)) if lossless_v4.len() > target => {
             let input_ips = compute_covered_ips_v4(&lossless_v4);
             if progress(Phase::Lossy { af: AddressFamily::IPv4, current_count: lossless_v4.len(), target }) == ControlFlow::Break(()) {
                 return Err(OptimizeError::Cancelled);
             }
             lossy_optimize_v4(&lossless_v4, target, config.max_over_coverage_ratio, input_ips)?
         }
+        Some(TargetSpec::MaxOverCoverage(ratio)) if lossless_v4.len() > 1 => {
+            let input_ips = compute_covered_ips_v4(&lossless_v4);
+            if progress(Phase::Lossy { af: AddressFamily::IPv4, current_count: lossless_v4.len(), target: 1 }) == ControlFlow::Break(()) {
+                return Err(OptimizeError::Cancelled);
+            }
+            lossy_optimize_v4(&lossless_v4, 1, Some(ratio), input_ips)?
+        }
         _ => lossless_v4,
     };
 
     let output_v6 = match config.ipv6_target {
-        Some(target) if lossless_v6.len() > target => {
+        Some(TargetSpec::EntryCount(target)) if lossless_v6.len() > target => {
             let input_ips = compute_covered_ips_v6(&lossless_v6);
             if progress(Phase::Lossy { af: AddressFamily::IPv6, current_count: lossless_v6.len(), target }) == ControlFlow::Break(()) {
                 return Err(OptimizeError::Cancelled);
             }
             lossy_optimize_v6(&lossless_v6, target, config.max_over_coverage_ratio, input_ips)?
+        }
+        Some(TargetSpec::MaxOverCoverage(ratio)) if lossless_v6.len() > 1 => {
+            let input_ips = compute_covered_ips_v6(&lossless_v6);
+            if progress(Phase::Lossy { af: AddressFamily::IPv6, current_count: lossless_v6.len(), target: 1 }) == ControlFlow::Break(()) {
+                return Err(OptimizeError::Cancelled);
+            }
+            lossy_optimize_v6(&lossless_v6, 1, Some(ratio), input_ips)?
         }
         _ => lossless_v6,
     };
@@ -180,6 +195,22 @@ fn validate_config(config: &OptimizerConfig) -> Result<(), OptimizeError> {
             return Err(OptimizeError::InvalidConfig {
                 message: format!("max_over_coverage_ratio ({}) must be in [0.0, 10.0] (0-1000%)", r),
             });
+        }
+    }
+    // Validate TargetSpec::MaxOverCoverage ratios
+    for (label, target) in [("ipv4_target", &config.ipv4_target), ("ipv6_target", &config.ipv6_target)] {
+        if let Some(TargetSpec::MaxOverCoverage(ratio)) = target {
+            if *ratio <= 0.0 || *ratio > 10.0 {
+                return Err(OptimizeError::InvalidConfig {
+                    message: format!("{} MaxOverCoverage ratio ({}) must be in (0.0, 10.0]", label, ratio),
+                });
+            }
+            // Conflict: MaxOverCoverage target + max_over_coverage_ratio
+            if config.max_over_coverage_ratio.is_some() {
+                return Err(OptimizeError::InvalidConfig {
+                    message: format!("{} is MaxOverCoverage — cannot also set max_over_coverage_ratio", label),
+                });
+            }
         }
     }
     Ok(())
@@ -417,7 +448,7 @@ mod tests {
             "10.0.5.0/24".parse().unwrap(),
         ];
         let config = OptimizerConfig {
-            ipv4_target: Some(1),
+            ipv4_target: Some(TargetSpec::EntryCount(1)),
             ..Default::default()
         };
         let result = optimize(&prefixes, &config).unwrap();
@@ -432,7 +463,7 @@ mod tests {
             "10.0.0.128/25".parse().unwrap(),
         ];
         let config = OptimizerConfig {
-            ipv4_target: Some(10),
+            ipv4_target: Some(TargetSpec::EntryCount(10)),
             ..Default::default()
         };
         let result = optimize(&prefixes, &config).unwrap();
@@ -452,7 +483,7 @@ mod tests {
     fn optimize_target_zero_error() {
         let prefixes: Vec<IpNet> = vec!["10.0.0.0/24".parse().unwrap()];
         let config = OptimizerConfig {
-            ipv4_target: Some(0),
+            ipv4_target: Some(TargetSpec::EntryCount(0)),
             ..Default::default()
         };
         let result = optimize(&prefixes, &config);
@@ -472,5 +503,68 @@ mod tests {
         // No target → lossless → 3 entries (non-siblings)
         assert_eq!(result.entries.len(), 3);
         assert_eq!(result.stats.total_ipv4_over_coverage, 0);
+    }
+
+    #[test]
+    fn optimize_max_over_coverage_stops_at_ratio() {
+        // 4 scattered /32s — merging all to /30 would give 4 IPs capacity, 0 original = 4 over-coverage
+        // With ratio=1.0 (100%), over-coverage must stay ≤ input_ips
+        let prefixes: Vec<IpNet> = vec![
+            "10.0.0.0/32".parse().unwrap(),
+            "10.0.0.1/32".parse().unwrap(),
+            "10.0.0.2/32".parse().unwrap(),
+            "10.0.0.3/32".parse().unwrap(),
+        ];
+        let config = OptimizerConfig {
+            ipv4_target: Some(TargetSpec::MaxOverCoverage(1.0)),
+            ..Default::default()
+        };
+        let result = optimize(&prefixes, &config).unwrap();
+        // Should merge but respect ratio — result count depends on greedy loop
+        // Key assertion: over-coverage ≤ input_ips (4 IPs * 1.0 = 4)
+        assert!(result.stats.total_ipv4_over_coverage <= 4);
+        // target_binding is always false for MaxOverCoverage
+        assert!(!result.stats.ipv4_target_binding);
+    }
+
+    #[test]
+    fn optimize_max_over_coverage_conflict_with_ratio() {
+        let prefixes: Vec<IpNet> = vec!["10.0.0.0/24".parse().unwrap()];
+        let config = OptimizerConfig {
+            ipv4_target: Some(TargetSpec::MaxOverCoverage(0.5)),
+            max_over_coverage_ratio: Some(1.0),
+            ..Default::default()
+        };
+        let result = optimize(&prefixes, &config);
+        assert!(matches!(result, Err(OptimizeError::InvalidConfig { .. })));
+    }
+
+    #[test]
+    fn optimize_max_over_coverage_zero_rejected() {
+        let prefixes: Vec<IpNet> = vec!["10.0.0.0/24".parse().unwrap()];
+        let config = OptimizerConfig {
+            ipv4_target: Some(TargetSpec::MaxOverCoverage(0.0)),
+            ..Default::default()
+        };
+        let result = optimize(&prefixes, &config);
+        assert!(matches!(result, Err(OptimizeError::InvalidConfig { .. })));
+    }
+
+    #[test]
+    fn optimize_entry_count_still_works() {
+        let prefixes: Vec<IpNet> = vec![
+            "10.0.0.0/24".parse().unwrap(),
+            "10.0.2.0/24".parse().unwrap(),
+            "10.0.4.0/24".parse().unwrap(),
+            "10.0.6.0/24".parse().unwrap(),
+        ];
+        let config = OptimizerConfig {
+            ipv4_target: Some(TargetSpec::EntryCount(2)),
+            max_over_coverage_ratio: Some(10.0),
+            ..Default::default()
+        };
+        let result = optimize(&prefixes, &config).unwrap();
+        assert!(result.entries.len() <= 2);
+        assert!(result.stats.ipv4_target_binding);
     }
 }

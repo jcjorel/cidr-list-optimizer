@@ -2,7 +2,7 @@ mod common;
 
 use std::net::Ipv4Addr;
 
-use cidr_optimizer::{optimize, validate_coverage, OptimizerConfig};
+use cidr_optimizer::{optimize, validate_coverage, OptimizerConfig, TargetSpec};
 use ipnet::IpNet;
 
 use common::time_it;
@@ -22,7 +22,7 @@ fn generate_spaced_v4(count: u32) -> Vec<IpNet> {
 fn test_10k_lossy_target_100() {
     let input = generate_spaced_v4(10_000);
     let config = OptimizerConfig {
-        ipv4_target: Some(100),
+        ipv4_target: Some(TargetSpec::EntryCount(100)),
         ..Default::default()
     };
 
@@ -39,7 +39,7 @@ fn test_10k_lossy_target_100() {
 fn test_10k_lossy_target_10() {
     let input = generate_spaced_v4(10_000);
     let config = OptimizerConfig {
-        ipv4_target: Some(10),
+        ipv4_target: Some(TargetSpec::EntryCount(10)),
         ..Default::default()
     };
 
@@ -57,7 +57,7 @@ fn test_10k_lossy_target_10() {
 fn test_100k_lossy_target_100() {
     let input = generate_spaced_v4(100_000);
     let config = OptimizerConfig {
-        ipv4_target: Some(100),
+        ipv4_target: Some(TargetSpec::EntryCount(100)),
         ..Default::default()
     };
 
@@ -75,7 +75,7 @@ fn test_100k_lossy_target_100() {
 fn test_100k_lossy_target_10() {
     let input = generate_spaced_v4(100_000);
     let config = OptimizerConfig {
-        ipv4_target: Some(10),
+        ipv4_target: Some(TargetSpec::EntryCount(10)),
         ..Default::default()
     };
 
@@ -93,7 +93,7 @@ fn test_100k_lossy_target_10() {
 fn test_1m_lossy_target_100() {
     let input = generate_spaced_v4(1_000_000);
     let config = OptimizerConfig {
-        ipv4_target: Some(100),
+        ipv4_target: Some(TargetSpec::EntryCount(100)),
         ..Default::default()
     };
 
@@ -111,7 +111,7 @@ fn test_1m_lossy_target_100() {
 fn test_1m_lossy_target_10() {
     let input = generate_spaced_v4(1_000_000);
     let config = OptimizerConfig {
-        ipv4_target: Some(10),
+        ipv4_target: Some(TargetSpec::EntryCount(10)),
         ..Default::default()
     };
 

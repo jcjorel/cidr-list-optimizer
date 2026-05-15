@@ -2,7 +2,7 @@ mod common;
 
 use std::net::Ipv4Addr;
 
-use cidr_optimizer::{optimize, validate_coverage, OptimizerConfig};
+use cidr_optimizer::{optimize, validate_coverage, OptimizerConfig, TargetSpec};
 use ipnet::IpNet;
 
 use common::time_it;
@@ -117,7 +117,7 @@ fn test_aggressive_lossy_collapse() {
         })
         .collect();
     let config = OptimizerConfig {
-        ipv4_target: Some(1),
+        ipv4_target: Some(TargetSpec::EntryCount(1)),
         max_over_coverage_ratio: None,
         ..Default::default()
     };
@@ -150,7 +150,7 @@ fn test_single_entry_edge_cases() {
     {
         let input: Vec<IpNet> = vec!["10.0.0.1/32".parse().unwrap()];
         let config = OptimizerConfig {
-            ipv4_target: Some(1),
+            ipv4_target: Some(TargetSpec::EntryCount(1)),
             ..Default::default()
         };
         let result = time_it("adversarial_single_v4_target_1", || {
