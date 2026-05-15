@@ -24,8 +24,8 @@ struct Cli {
     #[arg(long)]
     ipv6_target: Option<usize>,
 
-    /// Maximum over-coverage ratio per AF
-    #[arg(long)]
+    /// Maximum over-coverage percentage per AF (0-1000%, or -1 to disable)
+    #[arg(long, allow_negative_numbers = true)]
     max_over_coverage: Option<f64>,
 
     /// Maximum output prefix length for IPv4
@@ -104,10 +104,19 @@ struct AwsEntry {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Convert percentage to ratio. -1 disables capping entirely.
+    // Default to 100% when a target is set without explicit value.
+    let effective_ratio = match cli.max_over_coverage {
+        Some(v) if v == -1.0 => None,
+        Some(pct) => Some(pct / 100.0),
+        None if cli.ipv4_target.is_some() || cli.ipv6_target.is_some() => Some(1.0),
+        None => None,
+    };
+
     let config = OptimizerConfig {
         ipv4_target: cli.ipv4_target,
         ipv6_target: cli.ipv6_target,
-        max_over_coverage_ratio: cli.max_over_coverage,
+        max_over_coverage_ratio: effective_ratio,
         max_prefix_len_v4: cli.max_prefix_len_v4,
         max_prefix_len_v6: cli.max_prefix_len_v6,
         max_input_entries: cli.max_input_entries,
@@ -147,6 +156,39 @@ fn main() -> Result<()> {
         };
         optimize_from_reader(reader, &config)?
     };
+
+    // Fail hard if target was not met
+    if let Some(t) = cli.ipv4_target {
+        if result.stats.output_ipv4_count > t {
+            eprintln!(
+                "error: IPv4 target {} unreachable — got {} entries (over-coverage cap prevents further merging)\n\
+                 hint: raise the cap with --max-over-coverage <percentage> (up to 1000) or disable it with --max-over-coverage -1",
+                t, result.stats.output_ipv4_count
+            );
+            process::exit(2);
+        }
+    }
+    if let Some(t) = cli.ipv6_target {
+        if result.stats.output_ipv6_count > t {
+            eprintln!(
+                "error: IPv6 target {} unreachable — got {} entries (over-coverage cap prevents further merging)\n\
+                 hint: raise the cap with --max-over-coverage <percentage> (up to 1000) or disable it with --max-over-coverage -1",
+                t, result.stats.output_ipv6_count
+            );
+            process::exit(2);
+        }
+    }
+
+    // Warn on stderr if over-coverage exceeds 1000%
+    if effective_ratio.is_none() {
+        let input_v4_ips = result.stats.input_ipv4_count as u128;
+        let input_v6_ips = result.stats.input_ipv6_count as u128;
+        if (input_v4_ips > 0 && result.stats.total_ipv4_over_coverage > input_v4_ips * 10)
+            || (input_v6_ips > 0 && result.stats.total_ipv6_over_coverage > input_v6_ips * 10)
+        {
+            eprintln!("warning: over-coverage exceeds 1000%");
+        }
+    }
 
     if cli.stats {
         eprintln!(

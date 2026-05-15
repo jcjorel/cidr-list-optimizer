@@ -165,20 +165,20 @@ pub fn optimize_from_reader(
 }
 
 fn validate_config(config: &OptimizerConfig) -> Result<(), OptimizeError> {
-    if config.max_prefix_len_v4 > 32 {
+    if config.max_prefix_len_v4 == 0 || config.max_prefix_len_v4 > 32 {
         return Err(OptimizeError::InvalidConfig {
-            message: format!("max_prefix_len_v4 ({}) exceeds 32", config.max_prefix_len_v4),
+            message: format!("max_prefix_len_v4 ({}) must be in [1, 32]", config.max_prefix_len_v4),
         });
     }
-    if config.max_prefix_len_v6 > 128 {
+    if config.max_prefix_len_v6 == 0 || config.max_prefix_len_v6 > 128 {
         return Err(OptimizeError::InvalidConfig {
-            message: format!("max_prefix_len_v6 ({}) exceeds 128", config.max_prefix_len_v6),
+            message: format!("max_prefix_len_v6 ({}) must be in [1, 128]", config.max_prefix_len_v6),
         });
     }
     if let Some(r) = config.max_over_coverage_ratio {
-        if !(0.0..=1.0).contains(&r) {
+        if !(0.0..=10.0).contains(&r) {
             return Err(OptimizeError::InvalidConfig {
-                message: format!("max_over_coverage_ratio ({}) must be in [0.0, 1.0]", r),
+                message: format!("max_over_coverage_ratio ({}) must be in [0.0, 10.0] (0-1000%)", r),
             });
         }
     }
