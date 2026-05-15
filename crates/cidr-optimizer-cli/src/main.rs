@@ -107,7 +107,7 @@ fn main() -> Result<()> {
     // Convert percentage to ratio. -1 disables capping entirely.
     // Default to 100% when a target is set without explicit value.
     let effective_ratio = match cli.max_over_coverage {
-        Some(v) if v == -1.0 => None,
+        Some(-1.0) => None,
         Some(pct) => Some(pct / 100.0),
         None if cli.ipv4_target.is_some() || cli.ipv6_target.is_some() => Some(1.0),
         None => None,
