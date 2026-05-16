@@ -1,9 +1,9 @@
 use std::io::BufRead;
 
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 use crate::error::{OptimizeError, OptimizerError};
-use crate::types::InputEntry;
+use crate::types::{ExclusionEntry, InputEntry, ParsedCidr};
 
 /// Parsed and partitioned input.
 #[derive(Debug)]
@@ -18,50 +18,35 @@ pub struct ParsedInput {
 /// Maximum bytes per line to prevent OOM from single-line attacks.
 const MAX_LINE_BYTES: usize = 4096;
 
-/// Maximum number of parse warnings to retain.
-const MAX_WARNINGS: usize = 1000;
-
-/// Parse input lines into partitioned IPv4/IPv6 prefix vectors with indices.
-pub fn parse_input(
-    mut input: impl BufRead,
-    store_metadata: bool,
-    max_entries: usize,
-) -> Result<ParsedInput, OptimizerError> {
-    let mut ipv4 = Vec::new();
-    let mut ipv6 = Vec::new();
-    let mut input_metadata = Vec::new();
-    let mut warnings = Vec::new();
-    let mut entry_index: usize = 0;
-    let mut line_num: usize = 0;
+/// Parse a CIDR list from a reader into structured entries.
+///
+/// Handles blank lines, `#` full-line comments, inline `# comment` annotations,
+/// bare IPs (promoted to /32 or /128), and non-canonical CIDRs (silently truncated).
+pub fn parse_cidrs(input: impl BufRead) -> Result<Vec<ParsedCidr>, OptimizerError> {
+    let mut results = Vec::new();
     let mut line_buf = String::new();
+    let mut line_num: usize = 0;
+    let mut reader = input;
 
     loop {
         line_buf.clear();
-        let bytes_read = input.read_line(&mut line_buf)?;
+        let bytes_read = reader.read_line(&mut line_buf)?;
         if bytes_read == 0 {
             break;
         }
+        line_num += 1;
+
         if line_buf.len() > MAX_LINE_BYTES {
             return Err(OptimizerError::Parse {
-                line: line_num + 1,
+                line: line_num,
                 message: format!("line exceeds {} byte limit", MAX_LINE_BYTES),
             });
         }
+
         let trimmed = line_buf.trim();
 
-        // Skip comments and blank lines
         if trimmed.is_empty() || trimmed.starts_with('#') {
-            line_num += 1;
             continue;
-        }
-
-        // Check max entries
-        if entry_index >= max_entries {
-            return Err(OptimizeError::InputTooLarge {
-                count: entry_index + 1,
-                limit: max_entries,
-            }
-            .into());
         }
 
         // Split on first '#' to separate CIDR from inline comment
@@ -74,70 +59,115 @@ pub fn parse_input(
             (trimmed, None)
         };
 
-        if store_metadata {
-            input_metadata.push(InputEntry {
-                original: cidr_part.to_string(),
-                comment,
-            });
-        }
-
-        // Try parsing as CIDR first, then as bare IP (with /32 or /128 suffix)
-        let parsed: Result<ipnet::IpNet, String> = if cidr_part.contains('/') {
-            cidr_part.parse::<ipnet::IpNet>().map_err(|e| e.to_string())
+        let parsed: Result<IpNet, String> = if cidr_part.contains('/') {
+            cidr_part.parse::<IpNet>().map_err(|e| e.to_string())
         } else {
             use std::net::IpAddr;
             match cidr_part.parse::<IpAddr>() {
-                Ok(IpAddr::V4(ip)) => Ok(ipnet::IpNet::V4(
-                    Ipv4Net::new(ip, 32).unwrap(),
-                )),
-                Ok(IpAddr::V6(ip)) => Ok(ipnet::IpNet::V6(
-                    Ipv6Net::new(ip, 128).unwrap(),
-                )),
+                Ok(IpAddr::V4(ip)) => Ok(IpNet::V4(Ipv4Net::new(ip, 32).unwrap())),
+                Ok(IpAddr::V6(ip)) => Ok(IpNet::V6(Ipv6Net::new(ip, 128).unwrap())),
                 Err(e) => Err(e.to_string()),
             }
         };
 
         match parsed {
             Ok(net) => {
-                match net {
-                    ipnet::IpNet::V4(v4) => {
-                        let truncated = v4.trunc();
-                        if truncated != v4 && warnings.len() < MAX_WARNINGS {
-                            warnings.push((
-                                line_num + 1,
-                                format!("non-canonical CIDR '{}' normalized to '{}'", v4, truncated),
-                            ));
-                        }
-                        ipv4.push((entry_index, truncated));
-                    }
-                    ipnet::IpNet::V6(v6) => {
-                        let truncated = v6.trunc();
-                        if truncated != v6 && warnings.len() < MAX_WARNINGS {
-                            warnings.push((
-                                line_num + 1,
-                                format!("non-canonical CIDR '{}' normalized to '{}'", v6, truncated),
-                            ));
-                        }
-                        ipv6.push((entry_index, truncated));
-                    }
-                }
-                entry_index += 1;
+                let raw_text = cidr_part.to_string();
+                // Normalize non-canonical prefixes
+                let prefix = match net {
+                    IpNet::V4(v4) => IpNet::V4(v4.trunc()),
+                    IpNet::V6(v6) => IpNet::V6(v6.trunc()),
+                };
+                results.push(ParsedCidr { prefix, raw_text, comment, line_number: line_num });
             }
             Err(_) => {
                 return Err(OptimizerError::Parse {
-                    line: line_num + 1,
+                    line: line_num,
                     message: format!("invalid IP or CIDR: '{}'", &cidr_part[..cidr_part.len().min(100)]),
                 });
             }
         }
-        line_num += 1;
+    }
+
+    Ok(results)
+}
+
+/// Parse a CIDR list into exclusion entries, tagging each with the given source name.
+pub fn parse_exclusions(input: impl BufRead, source: &str) -> Result<Vec<ExclusionEntry>, OptimizerError> {
+    let cidrs = parse_cidrs(input)?;
+    Ok(cidrs.into_iter().map(|c| ExclusionEntry {
+        prefix: c.prefix,
+        source: source.to_owned(),
+        comment: c.comment,
+    }).collect())
+}
+
+/// Parse input lines into partitioned IPv4/IPv6 prefix vectors with indices.
+///
+/// Wraps `parse_cidrs` with max-entries enforcement, metadata storage, and
+/// non-canonical warnings — preserving all existing behavior.
+pub fn parse_input(
+    input: impl BufRead,
+    store_metadata: bool,
+    max_entries: usize,
+) -> Result<ParsedInput, OptimizerError> {
+    let cidrs = parse_cidrs(input)?;
+
+    if cidrs.len() > max_entries {
+        return Err(OptimizeError::InputTooLarge {
+            count: cidrs.len(),
+            limit: max_entries,
+        }.into());
+    }
+
+    let mut ipv4 = Vec::new();
+    let mut ipv6 = Vec::new();
+    let mut input_metadata = Vec::new();
+    let mut warnings = Vec::new();
+
+    for (entry_index, cidr) in cidrs.iter().enumerate() {
+        if store_metadata {
+            input_metadata.push(InputEntry {
+                original: cidr.raw_text.clone(),
+                comment: cidr.comment.clone(),
+            });
+        }
+
+        match cidr.prefix {
+            IpNet::V4(v4) => {
+                if cidr.raw_text.contains('/') {
+                    if let Ok(original) = cidr.raw_text.parse::<Ipv4Net>() {
+                        if original != v4 && warnings.len() < 1000 {
+                            warnings.push((
+                                cidr.line_number,
+                                format!("non-canonical CIDR '{}' normalized to '{}'", original, v4),
+                            ));
+                        }
+                    }
+                }
+                ipv4.push((entry_index, v4));
+            }
+            IpNet::V6(v6) => {
+                if cidr.raw_text.contains('/') {
+                    if let Ok(original) = cidr.raw_text.parse::<Ipv6Net>() {
+                        if original != v6 && warnings.len() < 1000 {
+                            warnings.push((
+                                cidr.line_number,
+                                format!("non-canonical CIDR '{}' normalized to '{}'", original, v6),
+                            ));
+                        }
+                    }
+                }
+                ipv6.push((entry_index, v6));
+            }
+        }
     }
 
     Ok(ParsedInput {
         ipv4,
         ipv6,
         input_metadata,
-        total_entries: entry_index,
+        total_entries: cidrs.len(),
         parse_warnings: warnings,
     })
 }
@@ -164,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_non_canonical_warning() {
+    fn parse_non_canonical_truncation() {
         let input = "10.0.0.5/24\n";
         let result = parse_input(Cursor::new(input), false, 100).unwrap();
         assert_eq!(result.ipv4.len(), 1);
@@ -222,5 +252,80 @@ mod tests {
         let input = "10.0.0.0/8 # comment # more\n";
         let result = parse_input(Cursor::new(input), true, 100).unwrap();
         assert_eq!(result.input_metadata[0].comment, Some("comment # more".to_string()));
+    }
+
+    // --- Tests for parse_cidrs ---
+
+    #[test]
+    fn parse_cidrs_empty_input() {
+        let result = parse_cidrs(Cursor::new("")).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_cidrs_only_comments_and_blanks() {
+        let result = parse_cidrs(Cursor::new("# comment\n\n  # another\n")).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_cidrs_valid_entries() {
+        let input = "10.0.0.0/24\n192.168.1.1\n2001:db8::/32\n";
+        let result = parse_cidrs(Cursor::new(input)).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].prefix, "10.0.0.0/24".parse::<IpNet>().unwrap());
+        assert_eq!(result[0].line_number, 1);
+        assert_eq!(result[1].prefix, "192.168.1.1/32".parse::<IpNet>().unwrap());
+        assert_eq!(result[1].line_number, 2);
+        assert_eq!(result[2].prefix, "2001:db8::/32".parse::<IpNet>().unwrap());
+        assert_eq!(result[2].line_number, 3);
+    }
+
+    #[test]
+    fn parse_cidrs_with_comments() {
+        let input = "10.0.0.0/24 # Office network\n192.168.1.0/24\n";
+        let result = parse_cidrs(Cursor::new(input)).unwrap();
+        assert_eq!(result[0].comment, Some("Office network".to_string()));
+        assert_eq!(result[1].comment, None);
+    }
+
+    #[test]
+    fn parse_cidrs_non_canonical_truncated() {
+        let input = "10.0.0.5/24\n";
+        let result = parse_cidrs(Cursor::new(input)).unwrap();
+        assert_eq!(result[0].prefix, "10.0.0.0/24".parse::<IpNet>().unwrap());
+    }
+
+    #[test]
+    fn parse_cidrs_invalid_entry() {
+        let result = parse_cidrs(Cursor::new("not_valid\n"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("parse error at line 1"));
+    }
+
+    #[test]
+    fn parse_cidrs_bare_ipv6() {
+        let result = parse_cidrs(Cursor::new("::1\n")).unwrap();
+        assert_eq!(result[0].prefix, "::1/128".parse::<IpNet>().unwrap());
+    }
+
+    // --- Tests for parse_exclusions ---
+
+    #[test]
+    fn parse_exclusions_maps_source() {
+        let input = "10.0.0.0/24 # internal\n192.168.0.0/16\n";
+        let result = parse_exclusions(Cursor::new(input), "blocklist.txt").unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].prefix, "10.0.0.0/24".parse::<IpNet>().unwrap());
+        assert_eq!(result[0].source, "blocklist.txt");
+        assert_eq!(result[0].comment, Some("internal".to_string()));
+        assert_eq!(result[1].source, "blocklist.txt");
+        assert_eq!(result[1].comment, None);
+    }
+
+    #[test]
+    fn parse_exclusions_empty_input() {
+        let result = parse_exclusions(Cursor::new(""), "empty.txt").unwrap();
+        assert!(result.is_empty());
     }
 }

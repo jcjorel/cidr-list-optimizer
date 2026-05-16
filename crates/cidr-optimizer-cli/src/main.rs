@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
 
-use cidr_optimizer::{optimize_from_reader, ExclusionEntry, OptimizeError, OptimizerConfig, OptimizerError, TargetSpec};
+use cidr_optimizer::{optimize_from_reader, ExclusionEntry, OptimizeError, OptimizerConfig, OptimizerError, TargetSpec, parse_exclusions};
 
 #[derive(Parser)]
 #[command(name = "cidr-optimizer")]
@@ -149,30 +149,7 @@ struct ExclusionCollisionJson {
 }
 
 fn parse_target_spec(s: &str) -> Result<TargetSpec> {
-    if let Some(rest) = s.strip_prefix("over-coverage=") {
-        let rest = rest.strip_suffix('%')
-            .ok_or_else(|| anyhow::anyhow!("over-coverage value must end with '%', e.g. over-coverage=0.1%"))?;
-        let pct: f64 = rest.parse()
-            .map_err(|_| anyhow::anyhow!("invalid over-coverage percentage: '{}'", rest))?;
-        Ok(TargetSpec::MaxOverCoverage(pct / 100.0))
-    } else {
-        let n: usize = s.parse()
-            .map_err(|_| anyhow::anyhow!("invalid target: '{}' (expected integer or over-coverage=X%)", s))?;
-        Ok(TargetSpec::EntryCount(n))
-    }
-}
-
-/// Parse a single CIDR or bare IP string into an IpNet.
-fn parse_cidr_or_ip(s: &str) -> Result<ipnet::IpNet> {
-    if s.contains('/') {
-        s.parse::<ipnet::IpNet>()
-            .map_err(|e| anyhow::anyhow!("invalid CIDR '{}': {}", s, e))
-    } else {
-        // Bare IP → /32 or /128
-        let addr: std::net::IpAddr = s.parse()
-            .map_err(|e| anyhow::anyhow!("invalid IP '{}': {}", s, e))?;
-        Ok(ipnet::IpNet::from(addr))
-    }
+    s.parse::<TargetSpec>().map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Parse exclusion files and return (entries, per-file source info).
@@ -187,38 +164,14 @@ fn parse_exclusion_files(paths: &[PathBuf]) -> Result<(Vec<ExclusionEntry>, Vec<
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
 
-        let mut file_count = 0;
-        for (line_num, line) in BufReader::new(file).lines().enumerate() {
-            let line = line.map_err(|e| anyhow::anyhow!("error reading '{}': {}", path.display(), e))?;
-            let line = line.trim().to_string();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            // Split on '#' for inline comment
-            let (cidr_part, comment) = if let Some(idx) = line.find('#') {
-                let c = line[idx + 1..].trim().to_string();
-                (line[..idx].trim(), Some(c))
-            } else {
-                (line.as_str(), None)
-            };
-
-            let prefix = parse_cidr_or_ip(cidr_part).map_err(|e| {
-                anyhow::anyhow!("{}:{}: {}", path.display(), line_num + 1, e)
-            })?;
-
-            entries.push(ExclusionEntry {
-                prefix,
-                source: filename.clone(),
-                comment,
-            });
-            file_count += 1;
-        }
+        let file_entries = parse_exclusions(BufReader::new(file), &filename)
+            .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
 
         source_info.push(ExclusionSourceInfo {
             source: filename,
-            entry_count: file_count,
+            entry_count: file_entries.len(),
         });
+        entries.extend(file_entries);
     }
 
     Ok((entries, source_info))

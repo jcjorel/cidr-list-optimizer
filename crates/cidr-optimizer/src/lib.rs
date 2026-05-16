@@ -9,9 +9,11 @@ pub mod exclusion;
 
 pub use types::{
     AddressFamily, AggregatedEntry, ExclusionCollision, ExclusionEntry, InputEntry,
-    OptimizerConfig, OptimizationResult, OptimizationStats, Phase, ReaderResult, TargetSpec,
+    OptimizerConfig, OptimizationResult, OptimizationStats, ParsedCidr, Phase, ReaderResult,
+    TargetSpec,
 };
 pub use error::{OptimizeError, OptimizerError};
+pub use parser::{parse_cidrs, parse_exclusions};
 
 use std::io::BufRead;
 use std::ops::ControlFlow;

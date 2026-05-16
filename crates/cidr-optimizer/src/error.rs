@@ -34,6 +34,9 @@ pub enum OptimizerError {
     #[error("parse error at line {line}: {message}")]
     Parse { line: usize, message: String },
 
+    #[error("invalid target spec: {message}")]
+    TargetSpecParse { message: String },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -58,6 +61,9 @@ mod tests {
     fn optimizer_error_display() {
         let e = OptimizerError::Parse { line: 5, message: "invalid IP".into() };
         assert_eq!(e.to_string(), "parse error at line 5: invalid IP");
+
+        let e = OptimizerError::TargetSpecParse { message: "missing %".into() };
+        assert_eq!(e.to_string(), "invalid target spec: missing %");
 
         let e = OptimizerError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
         assert_eq!(e.to_string(), "I/O error: gone");

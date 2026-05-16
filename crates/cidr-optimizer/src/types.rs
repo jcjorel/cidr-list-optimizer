@@ -1,4 +1,8 @@
+use std::str::FromStr;
+
 use ipnet::IpNet;
+
+use crate::error::OptimizerError;
 
 /// Specifies how the optimization target is defined per address family.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -7,6 +11,41 @@ pub enum TargetSpec {
     EntryCount(usize),
     /// Find minimum entries keeping over-coverage ≤ ratio (e.g., 0.001 for 0.1%).
     MaxOverCoverage(f64),
+}
+
+impl FromStr for TargetSpec {
+    type Err = OptimizerError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(rest) = s.strip_prefix("over-coverage=") {
+            let rest = rest.strip_suffix('%').ok_or_else(|| OptimizerError::TargetSpecParse {
+                message: "over-coverage value must end with '%', e.g. over-coverage=0.1%".into(),
+            })?;
+            let pct: f64 = rest.parse().map_err(|_| OptimizerError::TargetSpecParse {
+                message: format!("invalid over-coverage percentage: '{}'", rest),
+            })?;
+            if pct < 0.0 {
+                return Err(OptimizerError::TargetSpecParse {
+                    message: format!("over-coverage percentage must be non-negative, got '{}'", pct),
+                });
+            }
+            Ok(TargetSpec::MaxOverCoverage(pct / 100.0))
+        } else {
+            let n: usize = s.parse().map_err(|_| OptimizerError::TargetSpecParse {
+                message: format!("invalid target: '{}' (expected integer or over-coverage=X%)", s),
+            })?;
+            Ok(TargetSpec::EntryCount(n))
+        }
+    }
+}
+
+/// A single parsed CIDR line with metadata.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParsedCidr {
+    pub prefix: IpNet,
+    pub raw_text: String,
+    pub comment: Option<String>,
+    pub line_number: usize,
 }
 
 /// A single exclusion entry: a prefix that must not appear as over-coverage.
@@ -121,5 +160,63 @@ mod tests {
         assert_eq!(cfg.max_prefix_len_v6, 128);
         assert_eq!(cfg.max_input_entries, 10_000_000);
         assert!(!cfg.source_map);
+    }
+
+    #[test]
+    fn target_spec_from_str_integer() {
+        let ts: TargetSpec = "60".parse().unwrap();
+        assert_eq!(ts, TargetSpec::EntryCount(60));
+    }
+
+    #[test]
+    fn target_spec_from_str_zero() {
+        let ts: TargetSpec = "0".parse().unwrap();
+        assert_eq!(ts, TargetSpec::EntryCount(0));
+    }
+
+    #[test]
+    fn target_spec_from_str_over_coverage() {
+        let ts: TargetSpec = "over-coverage=0.1%".parse().unwrap();
+        assert_eq!(ts, TargetSpec::MaxOverCoverage(0.001));
+    }
+
+    #[test]
+    fn target_spec_from_str_over_coverage_zero() {
+        let ts: TargetSpec = "over-coverage=0%".parse().unwrap();
+        assert_eq!(ts, TargetSpec::MaxOverCoverage(0.0));
+    }
+
+    #[test]
+    fn target_spec_from_str_missing_percent() {
+        let result = "over-coverage=0.1".parse::<TargetSpec>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must end with '%'"));
+    }
+
+    #[test]
+    fn target_spec_from_str_invalid_number() {
+        let result = "over-coverage=abc%".parse::<TargetSpec>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid over-coverage percentage"));
+    }
+
+    #[test]
+    fn target_spec_from_str_negative() {
+        let result = "over-coverage=-1%".parse::<TargetSpec>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-negative"));
+    }
+
+    #[test]
+    fn target_spec_from_str_garbage() {
+        let result = "not_a_number".parse::<TargetSpec>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid target"));
+    }
+
+    #[test]
+    fn target_spec_from_str_empty() {
+        let result = "".parse::<TargetSpec>();
+        assert!(result.is_err());
     }
 }
