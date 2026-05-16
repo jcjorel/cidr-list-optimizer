@@ -37,6 +37,17 @@ When in doubt about which file owns content, apply: "Is this answering WHY (→ 
 3. MUST use cross-references (`See [Architecture](docs/ARCHITECTURE.md)`) instead of duplicating.
 4. MUST verify no content appears in more than one file after the edit.
 
+## Transparency rule
+
+Each governed documentation file MUST end with the following footer as its last paragraph, separated from the preceding content by a blank line:
+
+```markdown
+---
+
+*This project and its documentation were fully generated using Gen AI coding tools employing multi-pass adversarial reviews to minimize errors. While this process significantly reduces defects, it cannot guarantee the complete absence of bugs.*
+```
+
+
 ## Bootstrap Procedure
 
 1. MUST create `docs/` directory if it does not exist.

@@ -339,3 +339,7 @@ What happened: The exclusion zone blocked the merge that would have absorbed 10.
 - [User Guide](USER_GUIDE.md) — Full CLI flag reference and all configuration options
 - [Developer API](DEVELOPER_API.md) — Library crate integration reference
 - [Architecture](ARCHITECTURE.md) — How the algorithm works internally
+
+---
+
+*This project and its documentation were fully generated using Gen AI coding tools employing multi-pass adversarial reviews to minimize errors. While this process significantly reduces defects, it cannot guarantee the complete absence of bugs.*

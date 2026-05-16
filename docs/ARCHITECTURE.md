@@ -269,8 +269,9 @@ crates/
 │       │                        state. Populates exclusion_collisions on output entries.
 │       ├── types.rs             Public data types: OptimizerConfig, TargetSpec,
 │       │                        OptimizationResult, AggregatedEntry, OptimizationStats,
-│       │                        ExclusionEntry, ExclusionCollision, ParsedCidr, Phase,
-│       │                        AddressFamily. Pure data definitions except TargetSpec
+│       │                        ExclusionEntry, ExclusionCollision, ParsedCidr, InputEntry,
+│       │                        ReaderResult, Phase, AddressFamily. Pure data definitions
+│       │                        except TargetSpec
 │       │                        which implements FromStr for parsing target specification
 │       │                        strings ("60" or "over-coverage=0.1%").
 │       ├── error.rs             Error enums: OptimizeError (library-level) and
@@ -326,3 +327,7 @@ crates/
 5. RFC 4632: CIDR — [rfc4632](https://www.rfc-editor.org/rfc/rfc4632). Classless Inter-Domain Routing specification.
 6. Zhao, J. et al. "On the Aggregatability of Router Forwarding Tables," IEEE/ACM Transactions on Networking, 20(3), 2012. Proves lossless FIB aggregation is polynomial-time solvable via DP.
 7. Johnson, D.S. & Niemi, K.A. "On Knapsacks, Partitions, and a New Dynamic Programming Technique for Trees" (1983) — [INFORMS](https://pubsonline.informs.org/doi/pdf/10.1287/moor.8.1.1). Pseudo-polynomial DP for tree-structured optimization; basis for a future O(n·k) exact mode.
+
+---
+
+*This project and its documentation were fully generated using Gen AI coding tools employing multi-pass adversarial reviews to minimize errors. While this process significantly reduces defects, it cannot guarantee the complete absence of bugs.*

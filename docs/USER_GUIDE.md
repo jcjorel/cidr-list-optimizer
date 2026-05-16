@@ -342,3 +342,7 @@ echo "Optimization succeeded (exit $?)"
 
 - Processing time scales linearly with input size
 - If memory is constrained, reduce `max_input_entries` to fail fast rather than OOM
+
+---
+
+*This project and its documentation were fully generated using Gen AI coding tools employing multi-pass adversarial reviews to minimize errors. While this process significantly reduces defects, it cannot guarantee the complete absence of bugs.*

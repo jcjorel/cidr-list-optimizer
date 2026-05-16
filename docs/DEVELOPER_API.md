@@ -443,3 +443,7 @@ Populated on `AggregatedEntry.exclusion_collisions` when an output prefix overla
 
 - [Architecture](ARCHITECTURE.md) — Algorithm internals, data structures, and correctness arguments
 - [User Guide](USER_GUIDE.md) — CLI-equivalent behavior and output format details
+
+---
+
+*This project and its documentation were fully generated using Gen AI coding tools employing multi-pass adversarial reviews to minimize errors. While this process significantly reduces defects, it cannot guarantee the complete absence of bugs.*

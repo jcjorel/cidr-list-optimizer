@@ -118,3 +118,7 @@ A `Makefile` wraps these commands for convenience (`make build`, `make test`, `m
 ## License
 
 [MIT](LICENSE)
+
+---
+
+*This project and its documentation were fully generated using Gen AI coding tools employing multi-pass adversarial reviews to minimize errors. While this process significantly reduces defects, it cannot guarantee the complete absence of bugs.*
