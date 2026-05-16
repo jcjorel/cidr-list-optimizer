@@ -16,6 +16,38 @@ AWS networking services impose hard limits on allow-list entries (Security Group
 - **AWS-native output** — emits JSON ready for Security Groups, Prefix Lists, and WAF IP Sets with no post-processing
 - **Deterministic output** — same input always produces the same result, safe for CI/CD diffing and GitOps workflows
 
+## Real-World Example: AWS CloudFront IP Ranges
+
+The AWS [ip-ranges.json](https://ip-ranges.amazonaws.com/ip-ranges.json) publishes 204 IPv4 and 31 IPv6 CIDRs for CloudFront (235 total). The IPv6 list fits a Security Group as-is, but 204 IPv4 entries exceed the 60-rule default limit. Here's what the optimizer produces at various entry budgets:
+
+```bash
+# Download and filter CloudFront ranges
+curl -s https://ip-ranges.amazonaws.com/ip-ranges.json \
+  | jq -r '.prefixes[] | select(.service=="CLOUDFRONT") | .ip_prefix' > cloudfront.txt
+
+# Optimize to fit a Prefix List (150 entries) — negligible over-coverage
+cidr-optimizer --ipv4-target 150 --max-over-coverage 5 cloudfront.txt
+```
+
+| IPv4 Target | Result | Over-coverage | Extra IPs allowed |
+|:-----------:|:------:|:-------------:|------------------:|
+| *(lossless)* | 184 | 0% | 0 |
+| 170 | 170 | < 0.01% | 416 |
+| 160 | 160 | 0.05% | 1,951 |
+| 150 | 150 | 0.17% | 6,975 |
+| 140 | 140 | 0.44% | 18,623 |
+| 130 | 128 | 2.36% | 98,783 |
+| 120 | 120 | 5.26% | 220,219 |
+| 110 | 110 | 21.6% | 904,731 |
+| 100 | 100 | 69.1% | 2,896,667 |
+| 90 | 86 | 242% | 10,156,859 |
+| 80 | 80 | 355% | 14,875,067 |
+| 70 | 70 | 584% | 24,452,219 |
+| 60 | 58 | 1,011% | 42,348,795 |
+| 50 | 50 | 1,499% | 62,795,643 |
+
+**Reading the table**: "Over-coverage" is the percentage of extra IP addresses allowed beyond the original CloudFront ranges. At 150 entries, only 6,975 extra IPs are exposed (0.17%) — a practical sweet spot for a Prefix List. Fitting into a bare Security Group (60 rules) requires accepting 1,011% over-coverage, meaning the resulting supernet covers ~10× more addresses than CloudFront actually uses.
+
 ## Installation
 
 ```bash
