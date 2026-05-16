@@ -261,23 +261,30 @@ crates/
 ├── cidr-optimizer/              Core library crate
 │   └── src/
 │       ├── lib.rs               Public API surface: optimize(), optimize_with_progress(),
-│       │                        optimize_from_reader(), validate_coverage(). Orchestrates
+│       │                        optimize_from_reader(), validate_coverage(),
+│       │                        parse_cidrs(), parse_exclusions(). Orchestrates
 │       │                        the full pipeline (partition → lossless → lossy → assemble).
 │       │                        Owns the coverage validation invariant. Builds ExclusionSet
 │       │                        and passes to lossy phase. Detects exclusion-constrained
 │       │                        state. Populates exclusion_collisions on output entries.
 │       ├── types.rs             Public data types: OptimizerConfig, TargetSpec,
 │       │                        OptimizationResult, AggregatedEntry, OptimizationStats,
-│       │                        ExclusionEntry, ExclusionCollision, Phase, AddressFamily.
-│       │                        Pure data definitions with no logic.
+│       │                        ExclusionEntry, ExclusionCollision, ParsedCidr, Phase,
+│       │                        AddressFamily. Pure data definitions except TargetSpec
+│       │                        which implements FromStr for parsing target specification
+│       │                        strings ("60" or "over-coverage=0.1%").
 │       ├── error.rs             Error enums: OptimizeError (library-level) and
-│       │                        OptimizerError (reader-level, includes parse/IO).
-│       │                        Implements From conversions between them.
+│       │                        OptimizerError (reader-level, includes parse/IO/
+│       │                        target-spec parsing). Implements From conversions
+│       │                        between them.
 │       ├── parser.rs            Line-by-line input parsing with index assignment.
+│       │                        Exposes parse_cidrs() and parse_exclusions() as
+│       │                        reusable public APIs (re-exported at crate root).
 │       │                        Handles comments, blank lines, normalization warnings.
 │       │                        Collects input metadata (original text, inline comments)
 │       │                        when source-map is enabled. Enforces 4 KiB per-line
-│       │                        length limit. Returns partitioned IPv4/IPv6 vectors.
+│       │                        length limit. parse_input() wraps parse_cidrs() with
+│       │                        max-entries enforcement and IPv4/IPv6 partitioning.
 │       ├── lossless.rs          Sort-based lossless aggregation: radix sort, redundancy
 │       │                        elimination (monotone stack), max_prefix_len enforcement,
 │       │                        and sibling merging with cascading. Operates on
@@ -308,7 +315,7 @@ crates/
                                  Contains no optimization logic.
 ```
 
-**Interface boundaries**: The CLI depends on the library's public API only (`optimize`, `optimize_from_reader`, `OptimizerConfig`, result types). The library modules have a layered dependency: `lib.rs` → `lossless` → (radix sort internals); `lib.rs` → `trie` → `optimizer`; `lib.rs` → `exclusion`; `trie` → `exclusion` (for `mark_exclusions`); `lib.rs` → `source_map`. The `trie` and `optimizer` modules are decoupled — `optimizer` receives a `&mut BinaryTrie` and drives the greedy loop without knowing how the trie was constructed.
+**Interface boundaries**: The CLI depends on the library's public API only (`optimize`, `optimize_from_reader`, `parse_cidrs`, `parse_exclusions`, `TargetSpec::from_str()`, `OptimizerConfig`, result types). The library modules have a layered dependency: `lib.rs` → `lossless` → (radix sort internals); `lib.rs` → `trie` → `optimizer`; `lib.rs` → `exclusion`; `trie` → `exclusion` (for `mark_exclusions`); `lib.rs` → `source_map`. The `trie` and `optimizer` modules are decoupled — `optimizer` receives a `&mut BinaryTrie` and drives the greedy loop without knowing how the trie was constructed.
 
 ## References
 

@@ -20,18 +20,19 @@ The crate re-exports all public types from the root:
 pub use types::{
     AddressFamily, AggregatedEntry, ExclusionCollision, ExclusionEntry,
     InputEntry, OptimizerConfig, OptimizationResult, OptimizationStats,
-    Phase, ReaderResult, TargetSpec,
+    ParsedCidr, Phase, ReaderResult, TargetSpec,
 };
 pub use error::{OptimizeError, OptimizerError};
+pub use parser::{parse_cidrs, parse_exclusions};
 ```
 
 ### Module Visibility
 
 | Module | Visibility | Notes |
 |--------|-----------|-------|
-| `types` | `pub` | All data types |
-| `error` | `pub` | Error enums |
-| `parser` | `pub` | `parser::parse_input` accessible but not re-exported at root |
+| `types` | `pub` | All data types, re-exported at root |
+| `error` | `pub` | Error enums, re-exported at root |
+| `parser` | `pub` | `parse_cidrs` and `parse_exclusions` re-exported at root; `parse_input` accessible but not re-exported |
 | `lossless` | `pub` | Internal aggregation (not intended for direct use) |
 | `trie` | `pub` | Internal trie structure (not intended for direct use) |
 | `optimizer` | `pub` | Internal greedy optimizer (not intended for direct use) |
@@ -82,6 +83,40 @@ pub fn validate_coverage(input: &[IpNet], output: &[AggregatedEntry]) -> bool
 
 Verifies that every input prefix is contained by at least one output prefix. This is called internally by `optimize_with_progress` before returning results — you do not need to call it manually unless implementing custom pipelines. Returns `false` if coverage is lost (which would indicate a bug).
 
+### `parse_cidrs`
+
+```rust
+pub fn parse_cidrs(input: impl BufRead) -> Result<Vec<ParsedCidr>, OptimizerError>
+```
+
+Parses a CIDR list from a reader into structured entries. Handles blank lines, `#` full-line comments, inline `# comment` annotations, bare IPs (promoted to /32 or /128), and non-canonical CIDRs (silently truncated). Returns a parse error on invalid lines.
+
+### `parse_exclusions`
+
+```rust
+pub fn parse_exclusions(input: impl BufRead, source: &str) -> Result<Vec<ExclusionEntry>, OptimizerError>
+```
+
+Parses a CIDR list into exclusion entries, tagging each with the given `source` name. Wraps `parse_cidrs` — same input format rules apply.
+
+## `ParsedCidr`
+
+```rust
+pub struct ParsedCidr {
+    pub prefix: IpNet,
+    pub raw_text: String,
+    pub comment: Option<String>,
+    pub line_number: usize,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `prefix` | `IpNet` | Normalized (host-bits truncated) prefix |
+| `raw_text` | `String` | Original CIDR text as written in input (before normalization) |
+| `comment` | `Option<String>` | Inline comment text (after `#`), if present |
+| `line_number` | `usize` | 1-based line number in the input |
+
 ## `TargetSpec`
 
 ```rust
@@ -92,6 +127,15 @@ pub enum TargetSpec {
     MaxOverCoverage(f64),
 }
 ```
+
+`TargetSpec` implements `FromStr`, enabling parsing from strings:
+
+| Input string | Result |
+|-------------|--------|
+| `"60"` | `EntryCount(60)` |
+| `"over-coverage=0.1%"` | `MaxOverCoverage(0.001)` |
+
+Returns `OptimizerError::TargetSpecParse` on invalid input (missing `%` suffix, non-numeric value, negative percentage).
 
 ## `OptimizerConfig` Fields
 
@@ -209,6 +253,7 @@ Returned by `optimize_from_reader`:
 |---------|---------|
 | `Optimize(OptimizeError)` | Wraps any `OptimizeError` |
 | `Parse { line, message }` | Invalid input at specific line number |
+| `TargetSpecParse { message }` | Invalid target specification string (see `FromStr for TargetSpec`) |
 | `Io(std::io::Error)` | I/O failure reading input |
 
 ### Error Handling Pattern

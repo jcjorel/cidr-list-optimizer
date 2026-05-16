@@ -75,7 +75,7 @@ IPv6: 0 input → 0 output (compression: 1.0x)
 IPv4 over-coverage: 1024 IPs
 ```
 
-What happened: With a target of 4, the optimizer merged non-adjacent prefixes into wider CIDRs, accepting some over-coverage (IPs not in the original input that are now included). Validation is automatic — the library always verifies that every input prefix is covered by at least one output prefix before returning results. See [User Guide — `--max-over-coverage` Behavior](USER_GUIDE.md#--max-over-coverage-behavior) for how the default cap works.
+What happened: With a target of 4, the optimizer merged non-adjacent prefixes into wider CIDRs, accepting some over-coverage (IPs not in the original input that are now included). See [User Guide — `--max-over-coverage` Behavior](USER_GUIDE.md#--max-over-coverage-behavior) for how the default cap works.
 
 ## Scenario 3: IPv6 Budget Mode
 
