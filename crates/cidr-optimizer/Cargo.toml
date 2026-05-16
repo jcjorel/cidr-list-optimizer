@@ -1,6 +1,6 @@
 [package]
 name = "cidr-optimizer"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 rust-version = "1.93"
 description = "Fit oversized IP allow-lists into AWS entry limits by computing the least-worst CIDR superset"

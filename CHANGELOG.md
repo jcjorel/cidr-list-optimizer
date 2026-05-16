@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.1] - 2026-05-16
+
+### Changed
+
+- **Extract reusable parsing APIs into library** — `parse_cidrs()`, `parse_exclusions()`, and `FromStr for TargetSpec` are now public library APIs, simplifying CLI integration and enabling direct library-based parsing
+
 ## [1.2.0] - 2026-05-16
 
 ### Added
