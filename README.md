@@ -9,7 +9,7 @@ AWS networking services impose hard limits on allow-list entries (Security Group
 ## Features
 
 - **Lossless aggregation** — merges adjacent/overlapping CIDRs into the minimal equivalent set with zero over-exposition
-- **Budget-constrained optimization** — reduces entry count to fit AWS limits while minimizing additional IPs allowed
+- **Budget-constrained optimization** — when your list has more CIDRs than the AWS entry limit allows (e.g., 60 rules for a Security Group), widens the smallest ranges to merge neighbors and bring the count under the limit
 - **Bounded over-coverage** — caps the percentage of extra addresses introduced so you never open more than you accept
 - **Independent IPv4/IPv6 targets** — set separate entry budgets for IPv4 and IPv6 ranges (e.g., optimize IPv4 down to 50 entries while leaving IPv6 as-is) because real-world lists like the AWS IP ranges are overwhelmingly IPv4
 - **Source-map tracking** — traces every output CIDR back to its original inputs for audit and compliance review
