@@ -71,7 +71,7 @@ This hybrid avoids the worst case of a full trie (12.8M nodes for 100K scattered
 
 ### Phase 1: Parse & Partition
 
-Parses input line-by-line, assigning sequential indices for source-map tracking. Each entry is normalized (host bits truncated: `10.0.0.5/24` → `10.0.0.0/24`) and partitioned into IPv4/IPv6 streams. Non-canonical CIDRs emit a warning. Comments (`#`) and blank lines are skipped. Input size is bounded by `max_input_entries` to prevent OOM.
+Parses input line-by-line, assigning sequential indices for source-map tracking. Each entry is normalized (host bits truncated: `10.0.0.5/24` → `10.0.0.0/24`) and partitioned into IPv4/IPv6 streams. Non-canonical CIDRs emit a warning. Full-line comments (`#` at start) and blank lines are skipped; inline comments (text after `#` on a CIDR line) are stripped from the CIDR and preserved as metadata when source-map is enabled. Input size is bounded by `max_input_entries` to prevent OOM.
 
 ### Phase 2: Sort-Based Lossless Aggregation
 

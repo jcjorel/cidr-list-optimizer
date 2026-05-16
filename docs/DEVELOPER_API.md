@@ -6,7 +6,7 @@ Library crate integration reference for `cidr-optimizer`.
 
 ```toml
 [dependencies]
-cidr-optimizer = "1.1"
+cidr-optimizer = "1.2"
 ipnet = "2"
 ```
 
@@ -142,7 +142,7 @@ pub struct OptimizationResult {
 ```rust
 pub struct AggregatedEntry {
     pub prefix: IpNet,
-    pub source_indices: Option<Vec<usize>>,  // None if source_map disabled
+    pub source_indices: Option<Vec<usize>>,  // None if source_map disabled or no sources mapped
     pub over_coverage: u128,
     pub exclusion_collisions: Option<Vec<ExclusionCollision>>,  // None if no collisions
 }

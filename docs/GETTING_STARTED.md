@@ -11,12 +11,14 @@ Progressive scenarios to learn cidr-list-optimizer by doing. Each builds on the 
 Create `sample.txt`:
 
 ```
-10.0.0.0/25
-10.0.0.128/25
+10.0.0.0/25       # office-east lower half
+10.0.0.128/25     # office-east upper half
 10.0.1.0/24
 10.0.1.0/25
-192.168.1.1/32
+192.168.1.1/32    # jump host
 ```
+
+Lines starting with `#` are full-line comments (skipped entirely). Text after `#` on a CIDR line is an inline comment — captured and preserved in source-map output for traceability.
 
 Run:
 
@@ -215,6 +217,16 @@ cidr-optimizer --ipv4-target 1 --max-over-coverage -1 large-feed.txt
 ```
 
 This disables the cap entirely, allowing the optimizer to merge as aggressively as needed.
+
+### Alternative: Ratio Target Mode
+
+Instead of specifying an entry count and capping over-coverage separately, you can target a specific over-coverage percentage directly:
+
+```bash
+cidr-optimizer --ipv4-target 'over-coverage=5%' large-feed.txt
+```
+
+This minimizes the number of output entries while guaranteeing over-coverage stays within 5%. The optimizer finds the smallest entry count achievable within that bound. See [User Guide — `--max-over-coverage` Behavior](USER_GUIDE.md#--max-over-coverage-behavior) for details on the conflict rule with `--max-over-coverage`.
 
 ## Scenario 7: AWS Output Format
 
