@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0] 
+
+### Added
+
+- **Exclusion zones** — `--exclude-cidr FILE` flag (repeatable) prevents the optimizer from widening prefixes into specified ranges, protecting address space that must never appear as over-coverage (e.g., competitor networks, internal ranges)
+- **Excluded-input warnings** — `--warn-on-excluded-input` reports overlaps between output CIDRs and exclusion zones
+- Exit code 2 when exclusions make the entry target unreachable
+
+### Documentation
+
+- Document exclusion zones across all guides (README, User Guide, Developer API, Architecture, Getting Started)
+- Add CloudFront optimization example table to README
+- Clarify feature descriptions and budget optimization bullet in README
+
 ## [1.1.0] - 2026-05-16
 
 ### Breaking Changes
