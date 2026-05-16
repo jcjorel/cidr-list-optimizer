@@ -1,6 +1,6 @@
 ---
 name: project-documentation-mandatory-guidelines
-description: Prevents content duplication and misplacement across project documentation files. Use when reading, writing, creating, improving or reviewing README.md, docs/ARCHITECTURE.md, docs/USER_GUIDE.md, docs/GETTING_STARTED.md, or docs/DEVELOPER_API.md. Do NOT use for general documentation writing.
+description: 'Prevents content duplication and misplacement across project documentation files. Use when reading, writing, creating, improving or reviewing README.md, docs/ARCHITECTURE.md, docs/USER_GUIDE.md, docs/GETTING_STARTED.md, docs/DEVELOPER_API.md, or Cargo.toml package metadata. Do NOT use for general documentation writing.'
 ---
 
 The keywords MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT, RECOMMENDED, NOT RECOMMENDED, MAY, and OPTIONAL in this document are to be interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174).
@@ -9,7 +9,7 @@ A fact MUST appear in at most ONE file; cross-reference links replace repetition
 
 ## Scope
 
-This skill governs ONLY the 5 files listed in the File Ownership Zones table. Content that does not belong to any zone (e.g., CONTRIBUTING.md, LICENSE, benchmarks/) is OUT OF SCOPE — proceed without applying these rules.
+This skill governs ONLY the 5 files listed in the File Ownership Zones table AND the `[package]` metadata in `crates/cidr-optimizer/Cargo.toml` and `crates/cidr-optimizer-cli/Cargo.toml`. Content that does not belong to any zone (e.g., CONTRIBUTING.md, LICENSE, benchmarks/) is OUT OF SCOPE — proceed without applying these rules.
 
 ## Duplication Taxonomy
 
@@ -76,6 +76,44 @@ When in doubt about which file owns content, apply: "Is this answering WHY (→ 
 | `docs/ARCHITECTURE.md` | How It Works Inside | System diagram (ASCII/Mermaid showing phases); algorithm phases (parse, radix sort, lossless aggregation, path-compressed trie, greedy lossy optimization); data structures (trie node layout, arena allocation, BinaryHeap entry); complexity analysis table; memory budget table; cost-efficiency greedy rationale; path compression explanation; over-coverage tracking math; ratio check integer arithmetic; correctness argument; references to academic papers; crate structure with module responsibilities (complete sentences explaining what each module DOES, interface boundaries, and relationships); mathematical model behind configuration parameters (without listing defaults or valid ranges) | Value proposition; install commands; CLI flag reference; output format examples; step-by-step tutorials; library API usage examples; parameter default values or valid ranges; CLI usage examples; output format schemas; benchmark numbers or performance measurements |
 | `docs/USER_GUIDE.md` | How to Use It Day-to-Day | Full CLI reference (all flags with descriptions and defaults); output formats (plain, JSON, AWS) with full schema examples; source-map output interpretation (generic field definitions, all possible values, production usage patterns); `--stats` output format; integration patterns (as CLI in scripts, in CI/CD pipelines); performance tuning tips (actionable guidance, recommended values, tradeoff advice) | Value proposition; install commands; algorithm internals (trie structure, greedy math); complexity proofs; academic references; step-by-step tutorials; module dependency diagrams; data structure memory layouts; benchmark numbers; library API signatures; `OptimizerConfig` builder pattern; `Phase`/`AddressFamily` enum documentation; `OptimizeError`/`OptimizerError` type definitions; library integration examples; feature flags |
 | `docs/DEVELOPER_API.md` | Library Crate Integration Reference | Public API signatures (`optimize`, `optimize_with_progress`, `optimize_from_reader`); `OptimizerConfig` builder pattern and field documentation (type, default, valid range, behavioral effect — no mathematical rationale); `Phase` and `AddressFamily` enum documentation for progress callbacks; `OptimizeError` / `OptimizerError` types and handling patterns; `Cargo.toml` dependency snippet; complete integration examples (as library dependency, progress reporting, custom error handling); feature flags documentation; MSRV for library consumers; re-export structure and module visibility | CLI flags or CLI usage; algorithm internals (trie, greedy, radix sort); value proposition / feature overview; step-by-step tutorials; output format schemas for CLI; performance tuning tips for CLI users; install commands for the binary; architectural decisions or complexity analysis |
+
+
+## `Cargo.toml` Metadata Governance
+
+The `[package]` metadata in `crates/cidr-optimizer/Cargo.toml` and `crates/cidr-optimizer-cli/Cargo.toml` is published to crates.io and constitutes user-facing project documentation.
+
+### Ownership and Source of Truth
+
+| Cargo.toml field | Authoritative source | Sync direction |
+|-----------------|---------------------|----------------|
+| `description` | README.md value proposition (first sentence) | README → Cargo.toml |
+| `rust-version` | README.md prerequisites section | README ↔ Cargo.toml (bidirectional) |
+| `version` | `Cargo.toml` is authoritative | Cargo.toml → README (if version is mentioned) |
+| `readme` | MUST point to `../../README.md` | Fixed value |
+| `keywords` | Independently maintained per crate | N/A |
+| `categories` | Independently maintained per crate | N/A |
+| `repository` | Independently maintained | N/A |
+| `license` | LICENSE file is authoritative | N/A |
+
+### `description` Field Rules
+
+1. README.md is the **single source of truth** for the project's value proposition.
+2. `cidr-optimizer` description MUST be a ≤120 character condensation of the README value proposition.
+3. `cidr-optimizer-cli` description MUST begin with `"CLI for cidr-optimizer: "` followed by a condensed form of the library description.
+4. Descriptions MUST NOT contain markdown, links, or line breaks.
+5. When updating the README value proposition, MUST check both `Cargo.toml` descriptions for semantic drift and update them if they diverge.
+6. When updating a `Cargo.toml` description directly, MUST verify consistency with the README.
+
+### `rust-version` (MSRV) Sync Rules
+
+1. The MSRV stated in README prerequisites and both `Cargo.toml` files MUST be identical.
+2. When changing MSRV in any location, MUST update all three locations.
+
+### `version` Sync Rules
+
+1. Both crates MUST have the same version number.
+2. The internal dependency (`cidr-optimizer-cli` → `cidr-optimizer`) MUST reference the same version.
+3. Version changes are out of scope for this skill (managed by release process), but the Documentation Review Procedure MUST flag mismatches.
 
 ## Documentation Review Procedure
 
@@ -188,3 +226,13 @@ If all links are valid, output "No discrepancies found."
 
 - If violations are found, MUST present the consolidated report to the user before making changes.
 - MUST NOT auto-fix without user confirmation.
+
+### `Cargo.toml` Review Integration
+
+The `readme-review` subagent MUST additionally check:
+- `crates/cidr-optimizer/Cargo.toml` `description` is a faithful ≤120 char condensation of the README value proposition.
+- `crates/cidr-optimizer-cli/Cargo.toml` `description` follows the `"CLI for cidr-optimizer: "` prefix convention and aligns semantically with the library description.
+- `rust-version` in both `Cargo.toml` files matches the README prerequisites.
+- Both crates share the same `version` and the internal dependency version matches.
+
+Flag any divergence as a STALENESS finding.
