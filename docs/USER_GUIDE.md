@@ -25,6 +25,8 @@ cidr-optimizer [OPTIONS] [INPUT]
 | `--format <FMT>` | enum | `plain` | Output format: `plain`, `json`, `aws` |
 | `--source-map <FILE>` | PathBuf | — | Write source-map JSON to FILE |
 | `--stats` | bool | false | Print statistics to stderr |
+| `--exclude-cidr <FILE>` | PathBuf | — | Exclusion CIDR file. Ranges in this file are protected from absorption during lossy optimization. Can be specified multiple times |
+| `--warn-on-excluded-input` | bool | false | Warn on stderr when output prefixes overlap exclusion zones |
 
 ### Exit Codes
 
@@ -32,7 +34,7 @@ cidr-optimizer [OPTIONS] [INPUT]
 |------|---------|
 | 0 | Success |
 | 1 | Internal error (coverage invariant violation — indicates a bug) |
-| 2 | Target unreachable (over-coverage cap prevents meeting budget) |
+| 2 | Target unreachable (over-coverage cap or exclusion zones prevent meeting budget) |
 
 ### `--max-over-coverage` Behavior
 
@@ -56,6 +58,56 @@ For programmatic control of these parameters, see [Developer API — OptimizerCo
 ## Coverage Validation
 
 Coverage validation is always performed automatically. The library verifies that every input prefix is covered by at least one output prefix before returning results. If validation fails, the CLI exits with code 1 (indicates a bug — please report it).
+
+## Exclusion Zones
+
+Protect specific CIDR ranges from being absorbed by widened supernets during lossy optimization. Exclusions only affect the lossy phase — lossless aggregation is unaffected.
+
+### File Format
+
+Same as input: one CIDR per line, `#` full-line comments, blank lines ignored, inline comments supported (text after `#` on a CIDR line).
+
+```
+# Internal networks — do not absorb
+10.1.0.0/16    # corp network
+192.168.0.0/24 # monitoring
+```
+
+### Usage
+
+```bash
+# Single exclusion file
+cidr-optimizer --ipv4-target 60 --exclude-cidr protected.txt input.txt
+
+# Multiple exclusion files (merged into a single exclusion set)
+cidr-optimizer --ipv4-target 60 \
+  --exclude-cidr internal.txt \
+  --exclude-cidr monitoring.txt \
+  input.txt
+```
+
+### `--warn-on-excluded-input` Behavior
+
+When enabled, emits a warning on stderr for each output prefix that overlaps an exclusion zone:
+
+```
+warning: output prefix 10.1.0.0/16 overlaps exclusion 10.1.0.0/16 from internal.txt
+```
+
+This is informational — it does not change the exit code or output.
+
+### When Exclusions Prevent Reaching Target
+
+If exclusion zones block enough merges that the target entry count cannot be reached, the CLI exits with code 2:
+
+```
+error: IPv4 target unreachable — exclusion zones prevent sufficient merging
+hint: reduce exclusion entries or raise the target
+```
+
+### Programmatic Equivalent
+
+For library integration, see [Developer API — ExclusionEntry](DEVELOPER_API.md#exclusionentry).
 
 ## Library API
 
@@ -98,7 +150,10 @@ One CIDR per line, sorted by network address ascending (IPv4 before IPv6):
     "ipv6_compression_ratio": 1.0,
     "ipv4_target_binding": true,
     "ipv6_target_binding": false
-  }
+  },
+  "exclusion_sources": [
+    {"source": "internal.txt", "entry_count": 5}
+  ]
 }
 ```
 
@@ -106,6 +161,7 @@ Fields:
 - `prefix`: Output CIDR string
 - `source_count`: Number of original inputs covered (0 if source-map disabled)
 - `over_coverage`: Number of IPs in this prefix NOT in any input entry
+- `exclusion_sources`: Array of exclusion files used (omitted when no `--exclude-cidr` flags provided)
 
 ### AWS
 
@@ -132,7 +188,10 @@ When `--source-map <FILE>` is specified, the detailed source mapping is written 
         {"index": 0, "cidr": "10.0.0.0/24", "comment": null},
         {"index": 1, "cidr": "10.0.1.0/24", "comment": "partner-A"}
       ],
-      "over_coverage": 512
+      "over_coverage": 512,
+      "exclusion_collisions": [
+        {"exclusion_prefix": "10.0.1.0/24", "exclusion_source": "internal.txt", "exclusion_comment": "corp network"}
+      ]
     }
   ],
   "stats": {
@@ -146,7 +205,10 @@ When `--source-map <FILE>` is specified, the detailed source mapping is written 
     "ipv6_compression_ratio": 1.0,
     "ipv4_target_binding": true,
     "ipv6_target_binding": false
-  }
+  },
+  "exclusion_sources": [
+    {"source": "internal.txt", "entry_count": 5}
+  ]
 }
 ```
 
@@ -163,6 +225,15 @@ Each entry in the `entries` array contains:
 | `prefix` | string | Output CIDR (e.g. `"10.0.0.0/22"`) |
 | `sources` | array | Original inputs covered by this output prefix |
 | `over_coverage` | integer | IPs in this prefix not covered by any input |
+| `exclusion_collisions` | array or absent | Exclusion entries that intersect this output prefix (omitted when none) |
+
+Each element in `exclusion_collisions`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `exclusion_prefix` | string | The exclusion CIDR that intersects the output prefix |
+| `exclusion_source` | string | Origin filename of the exclusion entry |
+| `exclusion_comment` | string or null | Annotation from the exclusion entry |
 
 Each element in `sources`:
 
@@ -194,6 +265,8 @@ IPv4: 500000 input → 1000 output (compression: 500.0x)
 IPv6: 0 input → 0 output (compression: 1.0x)
 IPv4 over-coverage: 28456 IPs
 ```
+
+When exclusion zones prevent meeting the target, the JSON stats include `ipv4_exclusion_constrained: true` and/or `ipv6_exclusion_constrained: true` (omitted when `false`).
 
 ## Input Format
 

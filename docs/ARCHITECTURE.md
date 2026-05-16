@@ -95,14 +95,16 @@ When lossless output exceeds the target budget:
 
 2. **Bottom-up computation** of `coverage` (input IPs covered) and `leaf_count` at each node.
 
-3. **Initialize min-heap** with all internal nodes where `leaf_count ≥ 2`, keyed by cost-efficiency:
+3. **Exclusion marking**: if exclusions are configured, `mark_exclusions()` walks the trie and sets `is_excluded = true` on any node whose address interval intersects the ExclusionSet. Ancestors of excluded nodes are also marked. Excluded nodes are never collapsed by the greedy loop.
+
+4. **Initialize min-heap** with all internal nodes where `leaf_count ≥ 2` and `is_excluded = false`, keyed by cost-efficiency:
 
 ```
 efficiency = cost / (leaf_count - 1)
 cost = capacity(node) - coverage(node)
 ```
 
-4. **Greedy collapse loop**: Pop minimum-efficiency node, verify freshness via generation counter, check ratio cap, execute collapse (mark as leaf, invalidate descendants), update ancestors, push updated ancestors back into heap. Repeat until `entry_count ≤ target` or heap exhausted.
+5. **Greedy collapse loop**: Pop minimum-efficiency node, verify freshness via generation counter, check ratio cap, execute collapse (mark as leaf, invalidate descendants), update ancestors, push updated ancestors back into heap. Repeat until `entry_count ≤ target` or heap exhausted.
 
 **Dual-mode target specification**: The optimizer supports two target modes via `TargetSpec`:
 - `EntryCount(k)` — reduce to ≤k entries, optionally capped by a ratio. The loop terminates when `remaining ≤ k` or the ratio cap is hit.
@@ -133,7 +135,8 @@ TrieNode {
     depth: u8,                     // Depth in the binary trie (bits from root)
     is_leaf: bool,                 // Whether this is a current leaf
     skip_len: u8,                  // Path-compressed bits (0 = no compression)
-    _pad: [u8; 9],                 // Padding to reach 80-byte alignment
+    is_excluded: bool,             // Whether this node intersects an exclusion zone
+    _pad: [u8; 8],                 // Padding to reach 80-byte alignment
 }
 ```
 
@@ -186,6 +189,8 @@ For n=50K, k=5K this is ~250M operations — feasible but with high constant fac
 4. **Path compression safety**: Compressed (single-child) nodes have `leaf_count = 1` and are never collapse candidates. Path compression does not remove any valid candidate from the greedy's consideration set.
 
 5. **Determinism**: Identical input and configuration produce identical output. Ties in the heap are broken by `node_idx` (deterministic insertion order from trie construction).
+
+6. **Exclusion safety**: Exclusions only prevent collapses (set `is_excluded` on internal nodes). They never remove leaves or modify coverage values. Therefore, the coverage invariant (every input prefix is covered by some output leaf) is preserved — exclusions can only increase the output entry count, never decrease it.
 
 ## Over-Coverage Tracking
 
@@ -258,10 +263,13 @@ crates/
 │       ├── lib.rs               Public API surface: optimize(), optimize_with_progress(),
 │       │                        optimize_from_reader(), validate_coverage(). Orchestrates
 │       │                        the full pipeline (partition → lossless → lossy → assemble).
-│       │                        Owns the coverage validation invariant.
+│       │                        Owns the coverage validation invariant. Builds ExclusionSet
+│       │                        and passes to lossy phase. Detects exclusion-constrained
+│       │                        state. Populates exclusion_collisions on output entries.
 │       ├── types.rs             Public data types: OptimizerConfig, TargetSpec,
 │       │                        OptimizationResult, AggregatedEntry, OptimizationStats,
-│       │                        Phase, AddressFamily. Pure data definitions with no logic.
+│       │                        ExclusionEntry, ExclusionCollision, Phase, AddressFamily.
+│       │                        Pure data definitions with no logic.
 │       ├── error.rs             Error enums: OptimizeError (library-level) and
 │       │                        OptimizerError (reader-level, includes parse/IO).
 │       │                        Implements From conversions between them.
@@ -276,13 +284,18 @@ crates/
 │       │                        SourceMapPrefix<T> carrying source indices.
 │       ├── trie.rs              Path-compressed binary trie: arena-allocated nodes,
 │       │                        construction from lossless output, bottom-up coverage/
-│       │                        leaf_count computation, collapse execution, and leaf
-│       │                        extraction. Handles both IPv4 and IPv6 via generic
-│       │                        address traits.
+│       │                        leaf_count computation, collapse execution, leaf
+│       │                        extraction, and mark_exclusions() which marks nodes
+│       │                        whose intervals intersect exclusion ranges.
 │       ├── optimizer.rs         Greedy lossy optimizer: BinaryHeap management, cost-
 │       │                        efficiency ranking, generation-based staleness, ratio
-│       │                        cap checking, and ancestor update propagation. Operates
+│       │                        cap checking, and ancestor update propagation. Skips
+│       │                        collapse of nodes where is_excluded=true. Operates
 │       │                        on BinaryTrie without knowledge of address family.
+│       ├── exclusion.rs         Exclusion set construction from ExclusionEntry list.
+│       │                        Losslessly aggregates exclusion prefixes into sorted
+│       │                        non-overlapping intervals for O(log E) intersection
+│       │                        queries during lossy optimization.
 │       └── source_map.rs        Post-optimization source-map reconstruction via binary
 │                                search on sorted input. Maps each output prefix to the
 │                                set of original input indices it covers.
@@ -295,7 +308,7 @@ crates/
                                  Contains no optimization logic.
 ```
 
-**Interface boundaries**: The CLI depends on the library's public API only (`optimize`, `optimize_from_reader`, `OptimizerConfig`, result types). The library modules have a layered dependency: `lib.rs` → `lossless` → (radix sort internals); `lib.rs` → `trie` → `optimizer`; `lib.rs` → `source_map`. The `trie` and `optimizer` modules are decoupled — `optimizer` receives a `&mut BinaryTrie` and drives the greedy loop without knowing how the trie was constructed.
+**Interface boundaries**: The CLI depends on the library's public API only (`optimize`, `optimize_from_reader`, `OptimizerConfig`, result types). The library modules have a layered dependency: `lib.rs` → `lossless` → (radix sort internals); `lib.rs` → `trie` → `optimizer`; `lib.rs` → `exclusion`; `trie` → `exclusion` (for `mark_exclusions`); `lib.rs` → `source_map`. The `trie` and `optimizer` modules are decoupled — `optimizer` receives a `&mut BinaryTrie` and drives the greedy loop without knowing how the trie was constructed.
 
 ## References
 

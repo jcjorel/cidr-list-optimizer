@@ -9,10 +9,11 @@ AWS networking services impose hard limits on allow-list entries (Security Group
 ## Features
 
 - **Lossless aggregation** — merges adjacent/overlapping CIDRs into the minimal equivalent set with zero over-exposition
-- **Budget-constrained optimization** — when your list has more CIDRs than the AWS entry limit allows (e.g., 60 rules for a Security Group), widens the smallest ranges to merge neighbors and bring the count under the limit
+- **Budget-constrained optimization** — reduces entry count to fit your budget while minimizing additional IP addresses allowed
 - **Bounded over-coverage** — caps the percentage of extra addresses introduced so you never open more than you accept
 - **Independent IPv4/IPv6 targets** — set separate entry budgets for IPv4 and IPv6 ranges (e.g., optimize IPv4 down to 50 entries while leaving IPv6 as-is) because real-world lists like the AWS IP ranges are overwhelmingly IPv4
 - **Source-map tracking** — traces every output CIDR back to its original inputs for audit and compliance review
+- **Exclusion zones** — protect specific CIDR ranges from being absorbed by widened supernets
 - **AWS-native output** — emits JSON ready for Security Groups, Prefix Lists, and WAF IP Sets with no post-processing
 - **Deterministic output** — same input always produces the same result, safe for CI/CD diffing and GitOps workflows
 
@@ -32,19 +33,12 @@ cidr-optimizer --ipv4-target 150 --max-over-coverage 5 cloudfront.txt
 | IPv4 Target | Result | Over-coverage | Extra IPs allowed |
 |:-----------:|:------:|:-------------:|------------------:|
 | *(lossless)* | 184 | 0% | 0 |
-| 170 | 170 | < 0.01% | 416 |
-| 160 | 160 | 0.05% | 1,951 |
 | 150 | 150 | 0.17% | 6,975 |
-| 140 | 140 | 0.44% | 18,623 |
 | 130 | 128 | 2.36% | 98,783 |
 | 120 | 120 | 5.26% | 220,219 |
-| 110 | 110 | 21.6% | 904,731 |
-| 100 | 100 | 69.1% | 2,896,667 |
-| 90 | 86 | 242% | 10,156,859 |
-| 80 | 80 | 355% | 14,875,067 |
-| 70 | 70 | 584% | 24,452,219 |
 | 60 | 58 | 1,011% | 42,348,795 |
-| 50 | 50 | 1,499% | 62,795,643 |
+
+See [Getting Started](docs/GETTING_STARTED.md) for the full progressive tutorial.
 
 **Reading the table**: "Over-coverage" is the percentage of extra IP addresses allowed beyond the original CloudFront ranges. At 150 entries, only 6,975 extra IPs are exposed (0.17%) — a practical sweet spot for a Prefix List. Fitting into a bare Security Group (60 rules) requires accepting 1,011% over-coverage, meaning the resulting supernet covers ~10× more addresses than CloudFront actually uses.
 

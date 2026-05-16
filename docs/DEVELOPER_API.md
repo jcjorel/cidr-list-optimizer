@@ -6,7 +6,7 @@ Library crate integration reference for `cidr-optimizer`.
 
 ```toml
 [dependencies]
-cidr-optimizer = "1.0"
+cidr-optimizer = "1.1"
 ipnet = "2"
 ```
 
@@ -18,8 +18,9 @@ The crate re-exports all public types from the root:
 
 ```rust
 pub use types::{
-    AddressFamily, AggregatedEntry, InputEntry, OptimizerConfig,
-    OptimizationResult, OptimizationStats, Phase, ReaderResult, TargetSpec,
+    AddressFamily, AggregatedEntry, ExclusionCollision, ExclusionEntry,
+    InputEntry, OptimizerConfig, OptimizationResult, OptimizationStats,
+    Phase, ReaderResult, TargetSpec,
 };
 pub use error::{OptimizeError, OptimizerError};
 ```
@@ -35,6 +36,7 @@ pub use error::{OptimizeError, OptimizerError};
 | `trie` | `pub` | Internal trie structure (not intended for direct use) |
 | `optimizer` | `pub` | Internal greedy optimizer (not intended for direct use) |
 | `source_map` | `pub` | Internal source-map computation (not intended for direct use) |
+| `exclusion` | `pub` | Exclusion set construction and intersection queries (not intended for direct use) |
 
 ## Primary Functions
 
@@ -102,6 +104,7 @@ pub enum TargetSpec {
 | `max_prefix_len_v6` | `u8` | `128` | 1..=128 | Longest IPv6 prefix length in output |
 | `max_input_entries` | `usize` | `10_000_000` | 1..=∞ | Input size bound (prevents OOM) |
 | `source_map` | `bool` | `false` | — | Track which inputs map to each output prefix |
+| `exclusions` | `Vec<ExclusionEntry>` | `Vec::new()` | — | CIDR ranges protected from absorption during lossy optimization |
 
 `OptimizerConfig` implements `Default`.
 
@@ -141,6 +144,7 @@ pub struct AggregatedEntry {
     pub prefix: IpNet,
     pub source_indices: Option<Vec<usize>>,  // None if source_map disabled
     pub over_coverage: u128,
+    pub exclusion_collisions: Option<Vec<ExclusionCollision>>,  // None if no collisions
 }
 ```
 
@@ -158,6 +162,8 @@ pub struct OptimizationStats {
     pub ipv6_compression_ratio: f64,
     pub ipv4_target_binding: bool,   // true if lossless output exceeded target
     pub ipv6_target_binding: bool,
+    pub ipv4_exclusion_constrained: bool,  // true if exclusions prevented meeting target
+    pub ipv6_exclusion_constrained: bool,
 }
 ```
 
@@ -319,6 +325,74 @@ let config = OptimizerConfig {
 let result = optimize(&prefixes, &config)?;
 println!("Reduced to {} entries", result.stats.output_ipv4_count);
 ```
+
+### With Exclusion Zones
+
+```rust
+use cidr_optimizer::{optimize, ExclusionEntry, OptimizerConfig, TargetSpec};
+
+let prefixes: Vec<ipnet::IpNet> = vec![
+    "10.0.0.0/24".parse().unwrap(),
+    "10.0.1.0/24".parse().unwrap(),
+    "10.0.2.0/24".parse().unwrap(),
+    "10.0.3.0/24".parse().unwrap(),
+];
+
+let config = OptimizerConfig {
+    ipv4_target: Some(TargetSpec::EntryCount(2)),
+    exclusions: vec![ExclusionEntry {
+        prefix: "10.0.2.0/24".parse().unwrap(),
+        source: "internal.txt".to_string(),
+        comment: Some("corp network".to_string()),
+    }],
+    ..Default::default()
+};
+
+let result = optimize(&prefixes, &config).unwrap();
+// 10.0.2.0/24 is protected — optimizer cannot merge it into a wider supernet
+for entry in &result.entries {
+    println!("{}", entry.prefix);
+    if let Some(ref collisions) = entry.exclusion_collisions {
+        for c in collisions {
+            println!("  overlaps exclusion: {} ({})", c.exclusion_prefix, c.exclusion_source);
+        }
+    }
+}
+```
+
+## `ExclusionEntry`
+
+```rust
+pub struct ExclusionEntry {
+    pub prefix: IpNet,
+    pub source: String,
+    pub comment: Option<String>,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `prefix` | `IpNet` | CIDR range to protect from absorption |
+| `source` | `String` | Origin filename or identifier |
+| `comment` | `Option<String>` | Optional annotation (e.g. reason for exclusion) |
+
+## `ExclusionCollision`
+
+```rust
+pub struct ExclusionCollision {
+    pub exclusion_prefix: String,
+    pub exclusion_source: String,
+    pub exclusion_comment: Option<String>,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `exclusion_prefix` | `String` | The exclusion CIDR that intersects the output prefix |
+| `exclusion_source` | `String` | Origin filename of the exclusion entry |
+| `exclusion_comment` | `Option<String>` | Annotation from the exclusion entry |
+
+Populated on `AggregatedEntry.exclusion_collisions` when an output prefix overlaps one or more exclusion ranges. `None` when there are no collisions.
 
 ## See Also
 

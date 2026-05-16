@@ -272,6 +272,56 @@ cat feed1.txt feed2.txt feed3.txt | cidr-optimizer --ipv4-target 1000
 
 What happened: When no file argument is given (or `-` is passed explicitly), the CLI reads from stdin. This lets you pipe from `curl`, `cat`, or any command without intermediate files.
 
+## Scenario 9: Exclusion Zones
+
+**Goal**: Protect specific CIDR ranges from being absorbed during lossy optimization.
+
+Create `partners.txt`:
+
+```
+10.0.0.0/24
+10.0.1.0/24
+10.0.2.0/24
+10.0.3.0/24
+```
+
+Create `protected.txt`:
+
+```
+10.0.2.0/24  # monitoring subnet
+```
+
+Run:
+
+```bash
+cidr-optimizer --ipv4-target 2 --max-over-coverage -1 --exclude-cidr protected.txt partners.txt
+```
+
+Expected behavior: The CLI exits with code 2:
+
+```
+error: IPv4 target unreachable — exclusion zones prevent sufficient merging
+hint: reduce exclusion entries or raise the target
+```
+
+The optimizer merged 10.0.0.0/24 + 10.0.1.0/24 into 10.0.0.0/23, but could not merge further because 10.0.2.0/24 is protected by the exclusion zone. The best achievable result is 3 entries (10.0.0.0/23, 10.0.2.0/24, 10.0.3.0/24), which exceeds the target of 2.
+
+Now try with a reachable target:
+
+```bash
+cidr-optimizer --ipv4-target 3 --max-over-coverage -1 --exclude-cidr protected.txt partners.txt
+```
+
+Expected output:
+
+```
+10.0.0.0/23
+10.0.2.0/24
+10.0.3.0/24
+```
+
+What happened: The exclusion zone blocked the merge that would have absorbed 10.0.2.0/24 into a wider supernet. The optimizer merged what it could (10.0.0.0/24 + 10.0.1.0/24 → /23) while respecting the exclusion. For full exclusion zone documentation, see [User Guide — Exclusion Zones](USER_GUIDE.md#exclusion-zones).
+
 ## Next Steps
 
 - [User Guide](USER_GUIDE.md) — Full CLI flag reference and all configuration options
