@@ -64,6 +64,9 @@ pub fn optimize_trie(
     // Initialize heap with all internal nodes having leaf_count >= 2
     for idx in 0..trie.arena.len() {
         let node = &trie.arena[idx];
+        if node.is_excluded {
+            continue;
+        }
         if node.leaf_count >= 2 && !node.is_leaf {
             let cost = trie.collapse_cost(idx as u32);
             let eff = efficiency_key(cost, node.leaf_count);
@@ -80,7 +83,7 @@ pub fn optimize_trie(
         }
 
         let node = &trie.arena[node_idx as usize];
-        if node.is_leaf || node.generation != gen {
+        if node.is_excluded || node.is_leaf || node.generation != gen {
             // Heap compaction when stale entries dominate
             if heap.len() > 4 * remaining {
                 let arena = &trie.arena;
@@ -135,7 +138,7 @@ pub fn optimize_trie(
             trie.arena[ancestor as usize].generation =
                 trie.arena[ancestor as usize].generation.wrapping_add(1);
             let a = &trie.arena[ancestor as usize];
-            if !a.is_leaf && a.leaf_count >= 2 {
+            if !a.is_excluded && !a.is_leaf && a.leaf_count >= 2 {
                 let anc_cost = trie.collapse_cost(ancestor);
                 let anc_eff = efficiency_key(anc_cost, a.leaf_count);
                 heap.push(Reverse((anc_eff, ancestor, a.generation)));
@@ -247,5 +250,45 @@ mod tests {
         // u128::MAX * 2 = 2^129 - 2 = (1, 2^128 - 2) in (high, low)
         assert_eq!(hi, 1);
         assert_eq!(lo, u128::MAX - 1);
+    }
+
+    #[test]
+    fn optimize_respects_exclusion() {
+        use crate::exclusion::ExclusionSet;
+        use crate::trie::BinaryTrie;
+        use crate::types::ExclusionEntry;
+
+        // Two pairs of siblings that merge to /24s:
+        //   10.0.0.0/25 + 10.0.0.128/25 → 10.0.0.0/24
+        //   10.0.1.0/25 + 10.0.1.128/25 → 10.0.1.0/24
+        // Then the two /24s merge to 10.0.0.0/23
+        // Coverage at /23 = 512 = capacity, so exclusion within /23 won't trigger
+        // We need a scenario where coverage < capacity at the merge point.
+        //
+        // Use: 10.0.0.0/24 and 10.0.2.0/24 — these share a /22 parent (10.0.0.0/22)
+        // The /22 has capacity=1024 but coverage=512, so exclusion in the gap triggers
+        let entries = vec![
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.2.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256 },
+        ];
+
+        // Without exclusion: target=1 merges to /22
+        let mut trie_no_excl = BinaryTrie::build_from_v4(&entries).unwrap();
+        let _leaves = optimize_trie(&mut trie_no_excl, 1, None, 512);
+        assert_eq!(trie_no_excl.total_leaf_count(), 1);
+
+        // With exclusion of 10.0.1.0/24 (in the /22 gap, not covered by input)
+        let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
+        let excl = vec![ExclusionEntry {
+            prefix: "10.0.1.0/24".parse().unwrap(),
+            source: "test".to_string(),
+            comment: None,
+        }];
+        let set = ExclusionSet::build(&excl);
+        trie.mark_exclusions(&set, true);
+
+        let _leaves = optimize_trie(&mut trie, 1, None, 512);
+        // The /22 merge is blocked because it would cover 10.0.1.0/24 (excluded)
+        assert_eq!(trie.total_leaf_count(), 2);
     }
 }

@@ -1,6 +1,7 @@
 use ipnet::{Ipv4Net, Ipv6Net};
 
 use crate::error::OptimizeError;
+use crate::exclusion::ExclusionSet;
 use crate::lossless::SourceMapPrefix;
 
 pub type NodeIdx = u32;
@@ -19,7 +20,8 @@ pub struct TrieNode {
     pub depth: u8,
     pub is_leaf: bool,
     pub skip_len: u8,
-    _pad: [u8; 9],
+    pub is_excluded: bool,
+    _pad: [u8; 8],
 }
 
 const _: () = assert!(std::mem::size_of::<TrieNode>() == 80);
@@ -37,7 +39,8 @@ impl Default for TrieNode {
             depth: 0,
             is_leaf: false,
             skip_len: 0,
-            _pad: [0; 9],
+            is_excluded: false,
+            _pad: [0; 8],
         }
     }
 }
@@ -420,11 +423,87 @@ impl BinaryTrie {
         self.arena[node_idx as usize].leaf_count = total_leaves;
         (total_coverage, total_leaves)
     }
+
+    /// Mark internal nodes whose collapse would cover excluded IPs not already
+    /// covered by input leaves. Ancestors of excluded nodes are also excluded.
+    pub fn mark_exclusions(&mut self, exclusion_set: &ExclusionSet, is_v4: bool) {
+        let check_fn: fn(&ExclusionSet, u128, u128) -> bool = if is_v4 {
+            ExclusionSet::intersects_v4
+        } else {
+            ExclusionSet::intersects_v6
+        };
+
+        // Walk all internal nodes with leaf_count >= 2
+        for idx in 0..self.arena.len() {
+            let node = &self.arena[idx];
+            if node.is_leaf || node.leaf_count < 2 {
+                continue;
+            }
+
+            let (bits, prefix_len) = self.node_prefix_bits(idx as u32);
+            let (start, end) = self.interval_from_prefix(bits, prefix_len);
+
+            if !check_fn(exclusion_set, start, end) {
+                continue;
+            }
+
+            // Check if the excluded IPs are fully covered by input leaves under this node.
+            // If coverage == capacity, all IPs are already input-covered, so exclusion is moot.
+            let capacity = self.capacity(idx as u32);
+            let coverage = self.arena[idx].coverage;
+            if coverage >= capacity {
+                continue;
+            }
+
+            self.arena[idx].is_excluded = true;
+        }
+
+        // Propagate upward: ancestors of excluded nodes must also be excluded
+        for idx in 0..self.arena.len() {
+            if !self.arena[idx].is_excluded {
+                continue;
+            }
+            let mut ancestor = self.arena[idx].parent;
+            while ancestor != INVALID {
+                if self.arena[ancestor as usize].is_excluded {
+                    break; // already marked, ancestors above are too
+                }
+                self.arena[ancestor as usize].is_excluded = true;
+                ancestor = self.arena[ancestor as usize].parent;
+            }
+        }
+    }
+
+    /// Compute the interval (start, end inclusive) for a prefix given its bits and length.
+    fn interval_from_prefix(&self, bits: u128, prefix_len: u8) -> (u128, u128) {
+        if self.addr_bits == 32 {
+            let addr = (bits >> 96) as u32;
+            let start = addr as u128;
+            let end = if prefix_len == 32 {
+                start
+            } else {
+                start | ((1u128 << (32 - prefix_len)) - 1)
+            };
+            (start, end)
+        } else {
+            let start = bits;
+            let end = if prefix_len == 128 {
+                start
+            } else if prefix_len == 0 {
+                u128::MAX
+            } else {
+                start | ((1u128 << (128 - prefix_len)) - 1)
+            };
+            (start, end)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exclusion::ExclusionSet;
+    use crate::types::ExclusionEntry;
 
     #[test]
     fn node_size_is_80_bytes() {
@@ -512,5 +591,50 @@ mod tests {
         ];
         let trie = BinaryTrie::build_from_v6(&entries).unwrap();
         assert_eq!(trie.total_leaf_count(), 2);
+    }
+
+    #[test]
+    fn mark_exclusions_blocks_merge() {
+        // Two sibling /25s under 10.0.0.0/24 — their parent at /24 can merge them
+        let entries = vec![
+            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.0.128/25".parse().unwrap(), source_indices: vec![1], coverage: 128 },
+        ];
+
+        // Scenario: non-sibling entries where the parent has gaps
+        let entries2 = vec![
+            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.1.0/25".parse().unwrap(), source_indices: vec![1], coverage: 128 },
+        ];
+        let mut trie2 = BinaryTrie::build_from_v4(&entries2).unwrap();
+
+        // Exclude 10.0.0.200/32 — in the 10.0.0.128/25 range, not covered by input
+        let excl = vec![ExclusionEntry {
+            prefix: "10.0.0.200/32".parse().unwrap(),
+            source: "test".to_string(),
+            comment: None,
+        }];
+        let set = ExclusionSet::build(&excl);
+        trie2.mark_exclusions(&set, true);
+        // The parent node that would merge these two /25s covers 10.0.0.0-10.0.1.255
+        // which intersects with 10.0.0.200, and coverage < capacity → excluded
+        assert!(trie2.arena.iter().any(|n| n.is_excluded));
+
+        // Verify: when both /25s fully cover /24, exclusion within /24 is NOT marked
+        // because coverage == capacity
+        let mut trie3 = BinaryTrie::build_from_v4(&entries).unwrap();
+        let excl_within = vec![ExclusionEntry {
+            prefix: "10.0.0.50/32".parse().unwrap(),
+            source: "test".to_string(),
+            comment: None,
+        }];
+        let set_within = ExclusionSet::build(&excl_within);
+        trie3.mark_exclusions(&set_within, true);
+        // The /24 parent has coverage == capacity (256 == 256), so NOT excluded at that level
+        // But higher nodes (root etc.) have coverage < capacity and DO intersect → they get excluded
+        // The key point: the immediate parent of the two /25s is NOT excluded
+        let leaves = trie3.extract_leaf_indices();
+        let parent = trie3.arena[leaves[0] as usize].parent;
+        assert!(!trie3.arena[parent as usize].is_excluded);
     }
 }

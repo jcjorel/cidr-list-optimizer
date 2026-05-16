@@ -9,6 +9,22 @@ pub enum TargetSpec {
     MaxOverCoverage(f64),
 }
 
+/// A single exclusion entry: a prefix that must not appear as over-coverage.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExclusionEntry {
+    pub prefix: IpNet,
+    pub source: String,
+    pub comment: Option<String>,
+}
+
+/// Records a collision between an input prefix and an exclusion entry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExclusionCollision {
+    pub exclusion_prefix: String,
+    pub exclusion_source: String,
+    pub exclusion_comment: Option<String>,
+}
+
 /// Configuration for the CIDR optimizer.
 pub struct OptimizerConfig {
     pub ipv4_target: Option<TargetSpec>,
@@ -18,6 +34,7 @@ pub struct OptimizerConfig {
     pub max_prefix_len_v6: u8,
     pub max_input_entries: usize,
     pub source_map: bool,
+    pub exclusions: Vec<ExclusionEntry>,
 }
 
 impl Default for OptimizerConfig {
@@ -30,6 +47,7 @@ impl Default for OptimizerConfig {
             max_prefix_len_v6: 128,
             max_input_entries: 10_000_000,
             source_map: false,
+            exclusions: Vec::new(),
         }
     }
 }
@@ -53,6 +71,7 @@ pub struct AggregatedEntry {
     pub prefix: IpNet,
     pub source_indices: Option<Vec<usize>>,
     pub over_coverage: u128,
+    pub exclusion_collisions: Option<Vec<ExclusionCollision>>,
 }
 
 pub struct OptimizationResult {
@@ -71,6 +90,8 @@ pub struct OptimizationStats {
     pub ipv6_compression_ratio: f64,
     pub ipv4_target_binding: bool,
     pub ipv6_target_binding: bool,
+    pub ipv4_exclusion_constrained: bool,
+    pub ipv6_exclusion_constrained: bool,
 }
 
 /// A single input entry with its original text and optional inline comment.

@@ -5,10 +5,11 @@ pub mod lossless;
 pub mod trie;
 pub mod optimizer;
 pub mod source_map;
+pub mod exclusion;
 
 pub use types::{
-    AddressFamily, AggregatedEntry, InputEntry, OptimizerConfig, OptimizationResult,
-    OptimizationStats, Phase, ReaderResult, TargetSpec,
+    AddressFamily, AggregatedEntry, ExclusionCollision, ExclusionEntry, InputEntry,
+    OptimizerConfig, OptimizationResult, OptimizationStats, Phase, ReaderResult, TargetSpec,
 };
 pub use error::{OptimizeError, OptimizerError};
 
@@ -17,6 +18,7 @@ use std::ops::ControlFlow;
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
+use crate::exclusion::ExclusionSet;
 use crate::lossless::SourceMapPrefix;
 
 /// Primary API: optimize from pre-parsed prefixes.
@@ -75,20 +77,23 @@ pub fn optimize_with_progress(
     let ipv4_target_binding = matches!(config.ipv4_target, Some(TargetSpec::EntryCount(t)) if lossless_v4.len() > t);
     let ipv6_target_binding = matches!(config.ipv6_target, Some(TargetSpec::EntryCount(t)) if lossless_v6.len() > t);
 
+    // Build exclusion set from config
+    let exclusion_set = ExclusionSet::build(&config.exclusions);
+
     let output_v4 = match config.ipv4_target {
         Some(TargetSpec::EntryCount(target)) if lossless_v4.len() > target => {
             let input_ips = compute_covered_ips_v4(&lossless_v4);
             if progress(Phase::Lossy { af: AddressFamily::IPv4, current_count: lossless_v4.len(), target }) == ControlFlow::Break(()) {
                 return Err(OptimizeError::Cancelled);
             }
-            lossy_optimize_v4(&lossless_v4, target, config.max_over_coverage_ratio, input_ips)?
+            lossy_optimize_v4(&lossless_v4, target, config.max_over_coverage_ratio, input_ips, &exclusion_set)?
         }
         Some(TargetSpec::MaxOverCoverage(ratio)) if lossless_v4.len() > 1 => {
             let input_ips = compute_covered_ips_v4(&lossless_v4);
             if progress(Phase::Lossy { af: AddressFamily::IPv4, current_count: lossless_v4.len(), target: 1 }) == ControlFlow::Break(()) {
                 return Err(OptimizeError::Cancelled);
             }
-            lossy_optimize_v4(&lossless_v4, 1, Some(ratio), input_ips)?
+            lossy_optimize_v4(&lossless_v4, 1, Some(ratio), input_ips, &exclusion_set)?
         }
         _ => lossless_v4,
     };
@@ -99,21 +104,69 @@ pub fn optimize_with_progress(
             if progress(Phase::Lossy { af: AddressFamily::IPv6, current_count: lossless_v6.len(), target }) == ControlFlow::Break(()) {
                 return Err(OptimizeError::Cancelled);
             }
-            lossy_optimize_v6(&lossless_v6, target, config.max_over_coverage_ratio, input_ips)?
+            lossy_optimize_v6(&lossless_v6, target, config.max_over_coverage_ratio, input_ips, &exclusion_set)?
         }
         Some(TargetSpec::MaxOverCoverage(ratio)) if lossless_v6.len() > 1 => {
             let input_ips = compute_covered_ips_v6(&lossless_v6);
             if progress(Phase::Lossy { af: AddressFamily::IPv6, current_count: lossless_v6.len(), target: 1 }) == ControlFlow::Break(()) {
                 return Err(OptimizeError::Cancelled);
             }
-            lossy_optimize_v6(&lossless_v6, 1, Some(ratio), input_ips)?
+            lossy_optimize_v6(&lossless_v6, 1, Some(ratio), input_ips, &exclusion_set)?
         }
         _ => lossless_v6,
     };
 
     let _ = progress(Phase::Done);
 
-    let mut result = build_result(output_v4, output_v6, input_ipv4_count, input_ipv6_count, ipv4_target_binding, ipv6_target_binding)?;
+    // Detect exclusion-constrained: target was set but not met, and exclusions are active
+    let ipv4_exclusion_constrained = match config.ipv4_target {
+        Some(TargetSpec::EntryCount(target)) => {
+            output_v4.len() > target && !exclusion_set.is_empty_v4()
+        }
+        _ => false,
+    };
+    let ipv6_exclusion_constrained = match config.ipv6_target {
+        Some(TargetSpec::EntryCount(target)) => {
+            output_v6.len() > target && !exclusion_set.is_empty_v6()
+        }
+        _ => false,
+    };
+
+    let mut result = build_result(
+        output_v4, output_v6, input_ipv4_count, input_ipv6_count,
+        ipv4_target_binding, ipv6_target_binding,
+        ipv4_exclusion_constrained, ipv6_exclusion_constrained,
+    )?;
+
+    // Detect input/exclusion collisions
+    if !config.exclusions.is_empty() {
+        for entry in &mut result.entries {
+            let (start, end) = prefix_to_interval(&entry.prefix);
+            let collisions: Vec<ExclusionCollision> = match &entry.prefix {
+                IpNet::V4(_) => exclusion_set
+                    .find_intersecting_v4(&config.exclusions, start, end)
+                    .into_iter()
+                    .map(|e| ExclusionCollision {
+                        exclusion_prefix: e.prefix.to_string(),
+                        exclusion_source: e.source.clone(),
+                        exclusion_comment: e.comment.clone(),
+                    })
+                    .collect(),
+                IpNet::V6(_) => exclusion_set
+                    .find_intersecting_v6(&config.exclusions, start, end)
+                    .into_iter()
+                    .map(|e| ExclusionCollision {
+                        exclusion_prefix: e.prefix.to_string(),
+                        exclusion_source: e.source.clone(),
+                        exclusion_comment: e.comment.clone(),
+                    })
+                    .collect(),
+            };
+            if !collisions.is_empty() {
+                entry.exclusion_collisions = Some(collisions);
+            }
+        }
+    }
 
     // Populate source-map via binary search when enabled
     if config.source_map {
@@ -252,8 +305,12 @@ fn lossy_optimize_v4(
     target: usize,
     max_ratio: Option<f64>,
     input_covered_ips: u128,
+    exclusion_set: &ExclusionSet,
 ) -> Result<Vec<SourceMapPrefix<Ipv4Net>>, OptimizeError> {
     let mut trie = trie::BinaryTrie::build_from_v4(lossless)?;
+    if !exclusion_set.is_empty_v4() {
+        trie.mark_exclusions(exclusion_set, true);
+    }
     let _leaf_indices = optimizer::optimize_trie(&mut trie, target, max_ratio, input_covered_ips);
     Ok(trie.extract_leaves_v4())
 }
@@ -263,12 +320,17 @@ fn lossy_optimize_v6(
     target: usize,
     max_ratio: Option<f64>,
     input_covered_ips: u128,
+    exclusion_set: &ExclusionSet,
 ) -> Result<Vec<SourceMapPrefix<Ipv6Net>>, OptimizeError> {
     let mut trie = trie::BinaryTrie::build_from_v6(lossless)?;
+    if !exclusion_set.is_empty_v6() {
+        trie.mark_exclusions(exclusion_set, false);
+    }
     let _leaf_indices = optimizer::optimize_trie(&mut trie, target, max_ratio, input_covered_ips);
     Ok(trie.extract_leaves_v6())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_result(
     output_v4: Vec<SourceMapPrefix<Ipv4Net>>,
     output_v6: Vec<SourceMapPrefix<Ipv6Net>>,
@@ -276,6 +338,8 @@ fn build_result(
     input_ipv6_count: usize,
     ipv4_target_binding: bool,
     ipv6_target_binding: bool,
+    ipv4_exclusion_constrained: bool,
+    ipv6_exclusion_constrained: bool,
 ) -> Result<OptimizationResult, OptimizeError> {
     let output_ipv4_count = output_v4.len();
     let output_ipv6_count = output_v6.len();
@@ -310,6 +374,7 @@ fn build_result(
             prefix: IpNet::V4(e.prefix),
             source_indices: if e.source_indices.is_empty() { None } else { Some(e.source_indices) },
             over_coverage: cap.saturating_sub(e.coverage),
+            exclusion_collisions: None,
         });
     }
     for e in output_v6 {
@@ -319,6 +384,7 @@ fn build_result(
             prefix: IpNet::V6(e.prefix),
             source_indices: if e.source_indices.is_empty() { None } else { Some(e.source_indices) },
             over_coverage: cap.saturating_sub(e.coverage),
+            exclusion_collisions: None,
         });
     }
 
@@ -349,8 +415,33 @@ fn build_result(
             ipv6_compression_ratio,
             ipv4_target_binding,
             ipv6_target_binding,
+            ipv4_exclusion_constrained,
+            ipv6_exclusion_constrained,
         },
     })
+}
+
+/// Convert a prefix to its (start, end) interval for collision detection.
+fn prefix_to_interval(prefix: &IpNet) -> (u128, u128) {
+    match prefix {
+        IpNet::V4(v4) => {
+            let start = u32::from(v4.network()) as u128;
+            let end = u32::from(v4.broadcast()) as u128;
+            (start, end)
+        }
+        IpNet::V6(v6) => {
+            let start = u128::from(v6.network());
+            let pl = v6.prefix_len();
+            let end = if pl == 128 {
+                start
+            } else if pl == 0 {
+                u128::MAX
+            } else {
+                start | ((1u128 << (128 - pl)) - 1)
+            };
+            (start, end)
+        }
+    }
 }
 
 /// Verify that every input prefix is contained by at least one output prefix.
