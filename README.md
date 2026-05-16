@@ -18,7 +18,7 @@ AWS networking services impose hard limits on allow-list entries (Security Group
 
 ## Real-World Example: AWS CloudFront IP Ranges
 
-The AWS [ip-ranges.json](https://ip-ranges.amazonaws.com/ip-ranges.json) publishes 204 IPv4 and 31 IPv6 CIDRs for CloudFront (235 total). The IPv6 list fits a Security Group as-is, but 204 IPv4 entries exceed the 60-rule default limit. Here's what the optimizer produces at various entry budgets:
+The AWS [ip-ranges.json](https://ip-ranges.amazonaws.com/ip-ranges.json) publishes 204 IPv4 and 31 IPv6 CIDRs for CloudFront (235 total, as of 2026-05-15). The IPv6 list fits a Security Group as-is, but 204 IPv4 entries exceed the 60-rule default limit. Here's what the optimizer produces at various entry budgets:
 
 ```bash
 # Download and filter CloudFront ranges
