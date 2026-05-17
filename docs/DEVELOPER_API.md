@@ -6,7 +6,7 @@ Library crate integration reference for `cidr-optimizer`.
 
 ```toml
 [dependencies]
-cidr-optimizer = "1.2"
+cidr-optimizer = "1.3"
 ipnet = "2"
 ```
 
