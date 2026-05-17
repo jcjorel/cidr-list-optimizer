@@ -3,7 +3,7 @@ use std::io::BufRead;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 use crate::error::{OptimizeError, OptimizerError};
-use crate::types::{ExclusionEntry, InputEntry, ParsedCidr};
+use crate::types::{ExclusionEntry, InputEntry, ParsedCidr, PreferredEntry};
 
 /// Parsed and partitioned input.
 #[derive(Debug)]
@@ -96,6 +96,16 @@ pub fn parse_cidrs(input: impl BufRead) -> Result<Vec<ParsedCidr>, OptimizerErro
 pub fn parse_exclusions(input: impl BufRead, source: &str) -> Result<Vec<ExclusionEntry>, OptimizerError> {
     let cidrs = parse_cidrs(input)?;
     Ok(cidrs.into_iter().map(|c| ExclusionEntry {
+        prefix: c.prefix,
+        source: source.to_owned(),
+        comment: c.comment,
+    }).collect())
+}
+
+/// Parse a CIDR list into preferred entries, tagging each with the given source name.
+pub fn parse_preferred(input: impl BufRead, source: &str) -> Result<Vec<PreferredEntry>, OptimizerError> {
+    let cidrs = parse_cidrs(input)?;
+    Ok(cidrs.into_iter().map(|c| PreferredEntry {
         prefix: c.prefix,
         source: source.to_owned(),
         comment: c.comment,

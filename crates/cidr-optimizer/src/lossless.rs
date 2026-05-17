@@ -9,6 +9,9 @@ pub struct SourceMapPrefix<N> {
     /// Number of IPs actually covered by original inputs within this prefix.
     /// For lossless entries, equals the prefix capacity (zero over-coverage).
     pub coverage: u128,
+    /// Number of preferred IPs overlapping with the covered portion of this prefix.
+    /// Populated by the trie during lossy optimization; 0 for lossless-only entries.
+    pub preferred_overlap_in_coverage: u128,
 }
 
 /// Lossless aggregation for IPv4 prefixes.
@@ -30,6 +33,7 @@ pub fn lossless_aggregate_v4(
                 prefix,
                 source_indices: vec![idx],
                 coverage: cap,
+                preferred_overlap_in_coverage: 0,
             }
         })
         .collect();
@@ -80,6 +84,7 @@ pub fn lossless_aggregate_v6(
                 prefix,
                 source_indices: vec![idx],
                 coverage: cap,
+                preferred_overlap_in_coverage: 0,
             }
         })
         .collect();
@@ -125,6 +130,7 @@ fn radix_sort_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
         prefix: Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap(),
         source_indices: Vec::new(),
         coverage: 0,
+        preferred_overlap_in_coverage: 0,
     });
 
     // Key extraction: 5 bytes = [prefix_len, addr[3], addr[2], addr[1], addr[0]]
@@ -166,6 +172,7 @@ fn radix_sort_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
                 prefix: Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap(),
                 source_indices: Vec::new(),
                 coverage: 0,
+                preferred_overlap_in_coverage: 0,
             },
         ));
     }
@@ -259,6 +266,7 @@ fn sibling_merge_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
                     prefix: Ipv4Net::new(parent_net, parent_len).unwrap(),
                     source_indices: merged_indices,
                     coverage: merged_coverage,
+                    preferred_overlap_in_coverage: 0,
                 });
             } else {
                 break;
@@ -341,6 +349,7 @@ fn radix_sort_v6(entries: &mut Vec<SourceMapPrefix<Ipv6Net>>) {
                 prefix: Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).unwrap(),
                 source_indices: Vec::new(),
                 coverage: 0,
+                preferred_overlap_in_coverage: 0,
             },
         ));
     }
@@ -426,6 +435,7 @@ fn sibling_merge_v6(entries: &mut Vec<SourceMapPrefix<Ipv6Net>>) {
                     prefix: Ipv6Net::new(parent_net, parent_len).unwrap(),
                     source_indices: merged_indices,
                     coverage: merged_coverage,
+                    preferred_overlap_in_coverage: 0,
                 });
             } else {
                 break;

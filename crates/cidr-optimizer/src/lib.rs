@@ -6,14 +6,15 @@ pub mod trie;
 pub mod optimizer;
 pub mod source_map;
 pub mod exclusion;
+pub mod preferred;
 
 pub use types::{
     AddressFamily, AggregatedEntry, ExclusionCollision, ExclusionEntry, InputEntry,
-    OptimizerConfig, OptimizationResult, OptimizationStats, ParsedCidr, Phase, ReaderResult,
-    TargetSpec,
+    OptimizerConfig, OptimizationResult, OptimizationStats, ParsedCidr, Phase,
+    PreferredContribution, PreferredEntry, ReaderResult, TargetSpec,
 };
 pub use error::{OptimizeError, OptimizerError};
-pub use parser::{parse_cidrs, parse_exclusions};
+pub use parser::{parse_cidrs, parse_exclusions, parse_preferred};
 
 use std::io::BufRead;
 use std::ops::ControlFlow;
@@ -22,6 +23,7 @@ use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 use crate::exclusion::ExclusionSet;
 use crate::lossless::SourceMapPrefix;
+use crate::preferred::PreferredSet;
 
 /// Primary API: optimize from pre-parsed prefixes.
 pub fn optimize(
@@ -82,38 +84,41 @@ pub fn optimize_with_progress(
     // Build exclusion set from config
     let exclusion_set = ExclusionSet::build(&config.exclusions);
 
+    // Build preferred set from config
+    let preferred_set = PreferredSet::build(&config.preferred_cidrs);
+
+    // Compute input covered IPs before lossless vectors are moved
+    let input_ipv4_covered_ips = compute_covered_ips_v4(&lossless_v4);
+    let input_ipv6_covered_ips = compute_covered_ips_v6(&lossless_v6);
+
     let output_v4 = match config.ipv4_target {
         Some(TargetSpec::EntryCount(target)) if lossless_v4.len() > target => {
-            let input_ips = compute_covered_ips_v4(&lossless_v4);
             if progress(Phase::Lossy { af: AddressFamily::IPv4, current_count: lossless_v4.len(), target }) == ControlFlow::Break(()) {
                 return Err(OptimizeError::Cancelled);
             }
-            lossy_optimize_v4(&lossless_v4, target, config.max_over_coverage_ratio, input_ips, &exclusion_set)?
+            lossy_optimize_v4(&lossless_v4, target, config.max_over_coverage_ratio, input_ipv4_covered_ips, &exclusion_set, &preferred_set, config.max_non_preferred_over_coverage_ratio)?
         }
         Some(TargetSpec::MaxOverCoverage(ratio)) if lossless_v4.len() > 1 => {
-            let input_ips = compute_covered_ips_v4(&lossless_v4);
             if progress(Phase::Lossy { af: AddressFamily::IPv4, current_count: lossless_v4.len(), target: 1 }) == ControlFlow::Break(()) {
                 return Err(OptimizeError::Cancelled);
             }
-            lossy_optimize_v4(&lossless_v4, 1, Some(ratio), input_ips, &exclusion_set)?
+            lossy_optimize_v4(&lossless_v4, 1, Some(ratio), input_ipv4_covered_ips, &exclusion_set, &preferred_set, config.max_non_preferred_over_coverage_ratio)?
         }
         _ => lossless_v4,
     };
 
     let output_v6 = match config.ipv6_target {
         Some(TargetSpec::EntryCount(target)) if lossless_v6.len() > target => {
-            let input_ips = compute_covered_ips_v6(&lossless_v6);
             if progress(Phase::Lossy { af: AddressFamily::IPv6, current_count: lossless_v6.len(), target }) == ControlFlow::Break(()) {
                 return Err(OptimizeError::Cancelled);
             }
-            lossy_optimize_v6(&lossless_v6, target, config.max_over_coverage_ratio, input_ips, &exclusion_set)?
+            lossy_optimize_v6(&lossless_v6, target, config.max_over_coverage_ratio, input_ipv6_covered_ips, &exclusion_set, &preferred_set, config.max_non_preferred_over_coverage_ratio)?
         }
         Some(TargetSpec::MaxOverCoverage(ratio)) if lossless_v6.len() > 1 => {
-            let input_ips = compute_covered_ips_v6(&lossless_v6);
             if progress(Phase::Lossy { af: AddressFamily::IPv6, current_count: lossless_v6.len(), target: 1 }) == ControlFlow::Break(()) {
                 return Err(OptimizeError::Cancelled);
             }
-            lossy_optimize_v6(&lossless_v6, 1, Some(ratio), input_ips, &exclusion_set)?
+            lossy_optimize_v6(&lossless_v6, 1, Some(ratio), input_ipv6_covered_ips, &exclusion_set, &preferred_set, config.max_non_preferred_over_coverage_ratio)?
         }
         _ => lossless_v6,
     };
@@ -138,6 +143,9 @@ pub fn optimize_with_progress(
         output_v4, output_v6, input_ipv4_count, input_ipv6_count,
         ipv4_target_binding, ipv6_target_binding,
         ipv4_exclusion_constrained, ipv6_exclusion_constrained,
+        &preferred_set,
+        input_ipv4_covered_ips,
+        input_ipv6_covered_ips,
     )?;
 
     // Detect input/exclusion collisions
@@ -206,6 +214,29 @@ pub fn optimize_with_progress(
                 }
             }
         }
+
+        // Populate preferred contributions for source-map when preferred CIDRs are active
+        if !config.preferred_cidrs.is_empty() {
+            for entry in &mut result.entries {
+                if entry.over_coverage == 0 {
+                    continue;
+                }
+                let (start, end) = prefix_to_interval(&entry.prefix);
+                let overlapping = match &entry.prefix {
+                    IpNet::V4(_) => preferred_set.find_overlapping_v4(&config.preferred_cidrs, start, end),
+                    IpNet::V6(_) => preferred_set.find_overlapping_v6(&config.preferred_cidrs, start, end),
+                };
+                if !overlapping.is_empty() {
+                    entry.preferred_contributions = Some(
+                        overlapping.into_iter().map(|p| types::PreferredContribution {
+                            prefix: p.prefix.to_string(),
+                            source: p.source.clone(),
+                            comment: p.comment.clone(),
+                        }).collect()
+                    );
+                }
+            }
+        }
     }
 
     // Safety invariant: output MUST cover all input prefixes
@@ -253,6 +284,18 @@ fn validate_config(config: &OptimizerConfig) -> Result<(), OptimizeError> {
         if !(0.0..=10.0).contains(&r) {
             return Err(OptimizeError::InvalidConfig {
                 message: format!("max_over_coverage_ratio ({}) must be in [0.0, 10.0] (0-1000%)", r),
+            });
+        }
+    }
+    if let Some(r) = config.max_non_preferred_over_coverage_ratio {
+        if !(0.0..=10.0).contains(&r) {
+            return Err(OptimizeError::InvalidConfig {
+                message: format!("max_non_preferred_over_coverage_ratio ({}) must be in [0.0, 10.0] (0-1000%)", r),
+            });
+        }
+        if config.preferred_cidrs.is_empty() {
+            return Err(OptimizeError::InvalidConfig {
+                message: "max_non_preferred_over_coverage_ratio requires preferred_cidrs to be non-empty".into(),
             });
         }
     }
@@ -308,12 +351,17 @@ fn lossy_optimize_v4(
     max_ratio: Option<f64>,
     input_covered_ips: u128,
     exclusion_set: &ExclusionSet,
+    preferred_set: &PreferredSet,
+    max_non_preferred_ratio: Option<f64>,
 ) -> Result<Vec<SourceMapPrefix<Ipv4Net>>, OptimizeError> {
     let mut trie = trie::BinaryTrie::build_from_v4(lossless)?;
     if !exclusion_set.is_empty_v4() {
         trie.mark_exclusions(exclusion_set, true);
     }
-    let _leaf_indices = optimizer::optimize_trie(&mut trie, target, max_ratio, input_covered_ips);
+    if !preferred_set.is_empty_v4() {
+        trie.mark_preferred_overlaps(preferred_set, true);
+    }
+    let _leaf_indices = optimizer::optimize_trie(&mut trie, target, max_ratio, input_covered_ips, preferred_set, max_non_preferred_ratio);
     Ok(trie.extract_leaves_v4())
 }
 
@@ -323,12 +371,17 @@ fn lossy_optimize_v6(
     max_ratio: Option<f64>,
     input_covered_ips: u128,
     exclusion_set: &ExclusionSet,
+    preferred_set: &PreferredSet,
+    max_non_preferred_ratio: Option<f64>,
 ) -> Result<Vec<SourceMapPrefix<Ipv6Net>>, OptimizeError> {
     let mut trie = trie::BinaryTrie::build_from_v6(lossless)?;
     if !exclusion_set.is_empty_v6() {
         trie.mark_exclusions(exclusion_set, false);
     }
-    let _leaf_indices = optimizer::optimize_trie(&mut trie, target, max_ratio, input_covered_ips);
+    if !preferred_set.is_empty_v6() {
+        trie.mark_preferred_overlaps(preferred_set, false);
+    }
+    let _leaf_indices = optimizer::optimize_trie(&mut trie, target, max_ratio, input_covered_ips, preferred_set, max_non_preferred_ratio);
     Ok(trie.extract_leaves_v6())
 }
 
@@ -342,20 +395,71 @@ fn build_result(
     ipv6_target_binding: bool,
     ipv4_exclusion_constrained: bool,
     ipv6_exclusion_constrained: bool,
+    preferred_set: &PreferredSet,
+    input_ipv4_covered_ips: u128,
+    input_ipv6_covered_ips: u128,
 ) -> Result<OptimizationResult, OptimizeError> {
     let output_ipv4_count = output_v4.len();
     let output_ipv6_count = output_v6.len();
 
-    let total_ipv4_over_coverage: u128 = output_v4.iter().map(|e| {
-        let cap = if e.prefix.prefix_len() == 32 { 1u128 } else { 1u128 << (32 - e.prefix.prefix_len()) };
-        cap.saturating_sub(e.coverage)
-    }).sum();
+    let mut total_ipv4_over_coverage: u128 = 0;
+    let mut total_ipv4_preferred_over_coverage: u128 = 0;
 
-    let total_ipv6_over_coverage: u128 = output_v6.iter().map(|e| {
+    let mut entries: Vec<AggregatedEntry> = Vec::with_capacity(output_v4.len() + output_v6.len());
+
+    for e in &output_v4 {
+        let cap = if e.prefix.prefix_len() == 32 { 1u128 } else { 1u128 << (32 - e.prefix.prefix_len()) };
+        let over = cap.saturating_sub(e.coverage);
+        total_ipv4_over_coverage = total_ipv4_over_coverage.saturating_add(over);
+
+        let preferred_in_over = if over > 0 && !preferred_set.is_empty_v4() {
+            let start = u32::from(e.prefix.network()) as u128;
+            let end = u32::from(e.prefix.broadcast()) as u128;
+            let total_pref = preferred_set.overlap_count_v4(start, end);
+            total_pref.saturating_sub(e.preferred_overlap_in_coverage).min(over)
+        } else {
+            0
+        };
+        total_ipv4_preferred_over_coverage = total_ipv4_preferred_over_coverage.saturating_add(preferred_in_over);
+
+        entries.push(AggregatedEntry {
+            prefix: IpNet::V4(e.prefix),
+            source_indices: if e.source_indices.is_empty() { None } else { Some(e.source_indices.clone()) },
+            over_coverage: over,
+            exclusion_collisions: None,
+            preferred_over_coverage: preferred_in_over,
+            preferred_contributions: None,
+        });
+    }
+
+    let mut total_ipv6_over_coverage: u128 = 0;
+    let mut total_ipv6_preferred_over_coverage: u128 = 0;
+
+    for e in &output_v6 {
         let pl = e.prefix.prefix_len();
         let cap = if pl == 128 { 1u128 } else if (128 - pl) >= 128 { u128::MAX } else { 1u128 << (128 - pl) };
-        cap.saturating_sub(e.coverage)
-    }).sum();
+        let over = cap.saturating_sub(e.coverage);
+        total_ipv6_over_coverage = total_ipv6_over_coverage.saturating_add(over);
+
+        let preferred_in_over = if over > 0 && !preferred_set.is_empty_v6() {
+            let start = u128::from(e.prefix.network());
+            let end = if pl == 128 { start } else if pl == 0 { u128::MAX } else { start | ((1u128 << (128 - pl)) - 1) };
+            let total_pref = preferred_set.overlap_count_v6(start, end);
+            total_pref.saturating_sub(e.preferred_overlap_in_coverage).min(over)
+        } else {
+            0
+        };
+        total_ipv6_preferred_over_coverage = total_ipv6_preferred_over_coverage.saturating_add(preferred_in_over);
+
+        entries.push(AggregatedEntry {
+            prefix: IpNet::V6(e.prefix),
+            source_indices: if e.source_indices.is_empty() { None } else { Some(e.source_indices.clone()) },
+            over_coverage: over,
+            exclusion_collisions: None,
+            preferred_over_coverage: preferred_in_over,
+            preferred_contributions: None,
+        });
+    }
 
     let ipv4_compression_ratio = if input_ipv4_count > 0 {
         input_ipv4_count as f64 / output_ipv4_count.max(1) as f64
@@ -367,28 +471,6 @@ fn build_result(
     } else {
         1.0
     };
-
-    let mut entries: Vec<AggregatedEntry> = Vec::with_capacity(output_ipv4_count + output_ipv6_count);
-
-    for e in output_v4 {
-        let cap = if e.prefix.prefix_len() == 32 { 1u128 } else { 1u128 << (32 - e.prefix.prefix_len()) };
-        entries.push(AggregatedEntry {
-            prefix: IpNet::V4(e.prefix),
-            source_indices: if e.source_indices.is_empty() { None } else { Some(e.source_indices) },
-            over_coverage: cap.saturating_sub(e.coverage),
-            exclusion_collisions: None,
-        });
-    }
-    for e in output_v6 {
-        let pl = e.prefix.prefix_len();
-        let cap = if pl == 128 { 1u128 } else if (128 - pl) >= 128 { u128::MAX } else { 1u128 << (128 - pl) };
-        entries.push(AggregatedEntry {
-            prefix: IpNet::V6(e.prefix),
-            source_indices: if e.source_indices.is_empty() { None } else { Some(e.source_indices) },
-            over_coverage: cap.saturating_sub(e.coverage),
-            exclusion_collisions: None,
-        });
-    }
 
     // Sort: IPv4 first by network addr, then IPv6 by network addr
     entries.sort_by(|a, b| match (&a.prefix, &b.prefix) {
@@ -419,6 +501,12 @@ fn build_result(
             ipv6_target_binding,
             ipv4_exclusion_constrained,
             ipv6_exclusion_constrained,
+            total_ipv4_preferred_over_coverage,
+            total_ipv6_preferred_over_coverage,
+            total_ipv4_non_preferred_over_coverage: total_ipv4_over_coverage.saturating_sub(total_ipv4_preferred_over_coverage),
+            total_ipv6_non_preferred_over_coverage: total_ipv6_over_coverage.saturating_sub(total_ipv6_preferred_over_coverage),
+            input_ipv4_covered_ips,
+            input_ipv6_covered_ips,
         },
     })
 }

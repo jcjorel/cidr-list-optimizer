@@ -3,6 +3,7 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use crate::error::OptimizeError;
 use crate::exclusion::ExclusionSet;
 use crate::lossless::SourceMapPrefix;
+use crate::preferred::PreferredSet;
 
 pub type NodeIdx = u32;
 pub const INVALID: NodeIdx = u32::MAX;
@@ -13,6 +14,8 @@ pub struct TrieNode {
     pub skip_bits: u128,
     pub coverage: u128,
     pub collapsed_cost_sum: u128,
+    pub preferred_overlap: u128,
+    pub preferred_overlap_in_coverage: u128,
     pub children: [NodeIdx; 2],
     pub parent: NodeIdx,
     pub leaf_count: u32,
@@ -21,10 +24,10 @@ pub struct TrieNode {
     pub is_leaf: bool,
     pub skip_len: u8,
     pub is_excluded: bool,
-    _pad: [u8; 8],
+    _pad: [u8; 4],
 }
 
-const _: () = assert!(std::mem::size_of::<TrieNode>() == 80);
+const _: () = assert!(std::mem::size_of::<TrieNode>() == 112);
 
 impl Default for TrieNode {
     fn default() -> Self {
@@ -32,7 +35,9 @@ impl Default for TrieNode {
             skip_bits: 0,
             coverage: 0,
             collapsed_cost_sum: 0,
-            children: [INVALID, INVALID],
+            preferred_overlap: 0,
+            preferred_overlap_in_coverage: 0,
+            children: [INVALID; 2],
             parent: INVALID,
             leaf_count: 0,
             generation: 0,
@@ -40,7 +45,7 @@ impl Default for TrieNode {
             is_leaf: false,
             skip_len: 0,
             is_excluded: false,
-            _pad: [0; 8],
+            _pad: [0; 4],
         }
     }
 }
@@ -194,6 +199,7 @@ impl BinaryTrie {
                     prefix: net,
                     source_indices: Vec::new(),
                     coverage: self.arena[idx as usize].coverage,
+                    preferred_overlap_in_coverage: self.arena[idx as usize].preferred_overlap_in_coverage,
                 }
             })
             .collect()
@@ -210,6 +216,7 @@ impl BinaryTrie {
                     prefix: net,
                     source_indices: Vec::new(),
                     coverage: self.arena[idx as usize].coverage,
+                    preferred_overlap_in_coverage: self.arena[idx as usize].preferred_overlap_in_coverage,
                 }
             })
             .collect()
@@ -497,6 +504,46 @@ impl BinaryTrie {
             (start, end)
         }
     }
+
+    /// Public: compute the interval (start, end inclusive) for a given node.
+    pub fn node_interval(&self, node_idx: NodeIdx) -> (u128, u128) {
+        let (bits, prefix_len) = self.node_prefix_bits(node_idx);
+        self.interval_from_prefix(bits, prefix_len)
+    }
+
+    /// Bottom-up pass: set `preferred_overlap` for each node.
+    /// For leaves: overlap of preferred set with the leaf's covered IPs (capped at coverage).
+    /// For internal nodes: sum of children's preferred_overlap.
+    pub fn mark_preferred_overlaps(&mut self, preferred_set: &PreferredSet, is_v4: bool) {
+        self.compute_preferred_overlap(self.root, preferred_set, is_v4);
+    }
+
+    fn compute_preferred_overlap(&mut self, node_idx: NodeIdx, preferred_set: &PreferredSet, is_v4: bool) -> u128 {
+        let node = &self.arena[node_idx as usize];
+        if node.is_leaf {
+            let (start, end) = self.node_interval(node_idx);
+            let overlap = if is_v4 {
+                preferred_set.overlap_count_v4(start, end)
+            } else {
+                preferred_set.overlap_count_v6(start, end)
+            };
+            let capped = overlap.min(self.arena[node_idx as usize].coverage);
+            self.arena[node_idx as usize].preferred_overlap = capped;
+            self.arena[node_idx as usize].preferred_overlap_in_coverage = capped;
+            return capped;
+        }
+
+        let children = node.children;
+        let mut total: u128 = 0;
+        for &child in &children {
+            if child != INVALID {
+                total = total.saturating_add(self.compute_preferred_overlap(child, preferred_set, is_v4));
+            }
+        }
+        self.arena[node_idx as usize].preferred_overlap = total;
+        self.arena[node_idx as usize].preferred_overlap_in_coverage = total;
+        total
+    }
 }
 
 #[cfg(test)]
@@ -506,15 +553,15 @@ mod tests {
     use crate::types::ExclusionEntry;
 
     #[test]
-    fn node_size_is_80_bytes() {
-        assert_eq!(std::mem::size_of::<TrieNode>(), 80);
+    fn node_size_is_112_bytes() {
+        assert_eq!(std::mem::size_of::<TrieNode>(), 112);
     }
 
     #[test]
     fn build_simple_trie_v4() {
         let entries = vec![
-            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
-            SourceMapPrefix { prefix: "10.0.1.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.1.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256, preferred_overlap_in_coverage: 0 },
         ];
         let trie = BinaryTrie::build_from_v4(&entries).unwrap();
         assert_eq!(trie.total_leaf_count(), 2);
@@ -523,7 +570,7 @@ mod tests {
     #[test]
     fn capacity_root_v4() {
         let entries = vec![
-            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256, preferred_overlap_in_coverage: 0 },
         ];
         let trie = BinaryTrie::build_from_v4(&entries).unwrap();
         assert_eq!(trie.capacity(trie.root), u128::MAX);
@@ -532,7 +579,7 @@ mod tests {
     #[test]
     fn capacity_leaf_v4() {
         let entries = vec![
-            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256, preferred_overlap_in_coverage: 0 },
         ];
         let trie = BinaryTrie::build_from_v4(&entries).unwrap();
         let leaves = trie.extract_leaf_indices();
@@ -545,8 +592,8 @@ mod tests {
     fn path_compression_reduces_nodes() {
         // Two /32 entries that share a long prefix should use path compression
         let entries = vec![
-            SourceMapPrefix { prefix: "10.0.0.1/32".parse().unwrap(), source_indices: vec![0], coverage: 1 },
-            SourceMapPrefix { prefix: "10.0.0.2/32".parse().unwrap(), source_indices: vec![1], coverage: 1 },
+            SourceMapPrefix { prefix: "10.0.0.1/32".parse().unwrap(), source_indices: vec![0], coverage: 1, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.0.2/32".parse().unwrap(), source_indices: vec![1], coverage: 1, preferred_overlap_in_coverage: 0 },
         ];
         let trie = BinaryTrie::build_from_v4(&entries).unwrap();
         assert_eq!(trie.total_leaf_count(), 2);
@@ -557,8 +604,8 @@ mod tests {
     #[test]
     fn collapse_and_extract() {
         let entries = vec![
-            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128 },
-            SourceMapPrefix { prefix: "10.0.0.128/25".parse().unwrap(), source_indices: vec![1], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.0.128/25".parse().unwrap(), source_indices: vec![1], coverage: 128, preferred_overlap_in_coverage: 0 },
         ];
         let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
         assert_eq!(trie.total_leaf_count(), 2);
@@ -586,8 +633,8 @@ mod tests {
     #[test]
     fn build_v6_trie() {
         let entries = vec![
-            SourceMapPrefix { prefix: "2001:db8::/48".parse().unwrap(), source_indices: vec![0], coverage: 1u128 << 80 },
-            SourceMapPrefix { prefix: "2001:db8:1::/48".parse().unwrap(), source_indices: vec![1], coverage: 1u128 << 80 },
+            SourceMapPrefix { prefix: "2001:db8::/48".parse().unwrap(), source_indices: vec![0], coverage: 1u128 << 80, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "2001:db8:1::/48".parse().unwrap(), source_indices: vec![1], coverage: 1u128 << 80, preferred_overlap_in_coverage: 0 },
         ];
         let trie = BinaryTrie::build_from_v6(&entries).unwrap();
         assert_eq!(trie.total_leaf_count(), 2);
@@ -597,14 +644,14 @@ mod tests {
     fn mark_exclusions_blocks_merge() {
         // Two sibling /25s under 10.0.0.0/24 — their parent at /24 can merge them
         let entries = vec![
-            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128 },
-            SourceMapPrefix { prefix: "10.0.0.128/25".parse().unwrap(), source_indices: vec![1], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.0.128/25".parse().unwrap(), source_indices: vec![1], coverage: 128, preferred_overlap_in_coverage: 0 },
         ];
 
         // Scenario: non-sibling entries where the parent has gaps
         let entries2 = vec![
-            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128 },
-            SourceMapPrefix { prefix: "10.0.1.0/25".parse().unwrap(), source_indices: vec![1], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.1.0/25".parse().unwrap(), source_indices: vec![1], coverage: 128, preferred_overlap_in_coverage: 0 },
         ];
         let mut trie2 = BinaryTrie::build_from_v4(&entries2).unwrap();
 

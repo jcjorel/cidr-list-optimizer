@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use serde::Serialize;
 
-use cidr_optimizer::{optimize_from_reader, ExclusionEntry, OptimizeError, OptimizerConfig, OptimizerError, TargetSpec, parse_exclusions};
+use cidr_optimizer::{optimize_from_reader, ExclusionEntry, OptimizeError, OptimizerConfig, OptimizerError, PreferredEntry, TargetSpec, parse_exclusions, parse_preferred};
 
 #[derive(Parser)]
 #[command(name = "cidr-optimizer")]
@@ -56,6 +56,14 @@ struct Cli {
     /// Exclusion CIDR file (can be specified multiple times)
     #[arg(long = "exclude-cidr", value_name = "FILE")]
     exclude_cidrs: Vec<PathBuf>,
+
+    /// Preferred over-coverage CIDR file (can be specified multiple times)
+    #[arg(long = "preferred-over-coverage-cidrs", value_name = "FILE")]
+    preferred_cidrs: Vec<PathBuf>,
+
+    /// Maximum non-preferred over-coverage percentage (requires --preferred-over-coverage-cidrs)
+    #[arg(long, allow_negative_numbers = true)]
+    max_non_preferred_over_coverage: Option<f64>,
 
     /// Warn on stderr when input CIDRs overlap exclusion zones
     #[arg(long)]
@@ -108,6 +116,20 @@ struct JsonStats {
     ipv4_exclusion_constrained: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     ipv6_exclusion_constrained: bool,
+    #[serde(skip_serializing_if = "is_zero_u128")]
+    total_ipv4_preferred_over_coverage: u128,
+    #[serde(skip_serializing_if = "is_zero_u128")]
+    total_ipv6_preferred_over_coverage: u128,
+    #[serde(skip_serializing_if = "is_zero_u128")]
+    total_ipv4_non_preferred_over_coverage: u128,
+    #[serde(skip_serializing_if = "is_zero_u128")]
+    total_ipv6_non_preferred_over_coverage: u128,
+    input_ipv4_covered_ips: u128,
+    input_ipv6_covered_ips: u128,
+}
+
+fn is_zero_u128(v: &u128) -> bool {
+    *v == 0
 }
 
 #[derive(Serialize)]
@@ -129,8 +151,20 @@ struct SourceMapEntry {
     prefix: String,
     sources: Vec<SourceMapSource>,
     over_coverage: u128,
+    #[serde(skip_serializing_if = "is_zero_u128")]
+    preferred_over_coverage: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     exclusion_collisions: Option<Vec<ExclusionCollisionJson>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preferred_contributions: Option<Vec<PreferredContributionJson>>,
+}
+
+#[derive(Serialize)]
+struct PreferredContributionJson {
+    prefix: String,
+    source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comment: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -177,6 +211,22 @@ fn parse_exclusion_files(paths: &[PathBuf]) -> Result<(Vec<ExclusionEntry>, Vec<
     Ok((entries, source_info))
 }
 
+/// Parse preferred CIDR files.
+fn parse_preferred_files(paths: &[PathBuf]) -> Result<Vec<PreferredEntry>> {
+    let mut entries = Vec::new();
+    for path in paths {
+        let file = File::open(path)
+            .map_err(|e| anyhow::anyhow!("cannot open preferred file '{}': {}", path.display(), e))?;
+        let filename = path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let file_entries = parse_preferred(BufReader::new(file), &filename)
+            .map_err(|e| anyhow::anyhow!("{}: {}", path.display(), e))?;
+        entries.extend(file_entries);
+    }
+    Ok(entries)
+}
+
 fn build_json_entry(
     e: &cidr_optimizer::AggregatedEntry,
 ) -> JsonEntry {
@@ -201,6 +251,12 @@ fn build_json_stats(stats: &cidr_optimizer::OptimizationStats) -> JsonStats {
         ipv6_target_binding: stats.ipv6_target_binding,
         ipv4_exclusion_constrained: stats.ipv4_exclusion_constrained,
         ipv6_exclusion_constrained: stats.ipv6_exclusion_constrained,
+        total_ipv4_preferred_over_coverage: stats.total_ipv4_preferred_over_coverage,
+        total_ipv6_preferred_over_coverage: stats.total_ipv6_preferred_over_coverage,
+        total_ipv4_non_preferred_over_coverage: stats.total_ipv4_non_preferred_over_coverage,
+        total_ipv6_non_preferred_over_coverage: stats.total_ipv6_non_preferred_over_coverage,
+        input_ipv4_covered_ips: stats.input_ipv4_covered_ips,
+        input_ipv6_covered_ips: stats.input_ipv6_covered_ips,
     }
 }
 
@@ -232,6 +288,17 @@ fn main() -> Result<()> {
     // Parse exclusion files
     let (exclusions, exclusion_sources) = parse_exclusion_files(&cli.exclude_cidrs)?;
 
+    // Parse preferred files
+    let preferred_cidrs = parse_preferred_files(&cli.preferred_cidrs)?;
+
+    // Validate: --max-non-preferred-over-coverage requires --preferred-over-coverage-cidrs
+    if cli.max_non_preferred_over_coverage.is_some() && cli.preferred_cidrs.is_empty() {
+        eprintln!("error: --max-non-preferred-over-coverage requires --preferred-over-coverage-cidrs");
+        process::exit(1);
+    }
+
+    let max_non_preferred_ratio = cli.max_non_preferred_over_coverage.map(|pct| pct / 100.0);
+
     let config = OptimizerConfig {
         ipv4_target,
         ipv6_target,
@@ -241,6 +308,8 @@ fn main() -> Result<()> {
         max_input_entries: cli.max_input_entries,
         source_map: cli.source_map.is_some(),
         exclusions,
+        preferred_cidrs,
+        max_non_preferred_over_coverage_ratio: max_non_preferred_ratio,
     };
 
     // Run optimization
@@ -336,10 +405,48 @@ fn main() -> Result<()> {
             result.stats.ipv6_compression_ratio,
         );
         if result.stats.total_ipv4_over_coverage > 0 {
-            eprintln!("IPv4 over-coverage: {} IPs", result.stats.total_ipv4_over_coverage);
+            if result.stats.input_ipv4_covered_ips > 0 {
+                let pct = result.stats.total_ipv4_over_coverage as f64
+                    / result.stats.input_ipv4_covered_ips as f64 * 100.0;
+                eprintln!("IPv4 over-coverage: {:.2}% ({} IPs)", pct, result.stats.total_ipv4_over_coverage);
+            } else {
+                eprintln!("IPv4 over-coverage: {} IPs", result.stats.total_ipv4_over_coverage);
+            }
+            if !cli.preferred_cidrs.is_empty() {
+                if result.stats.input_ipv4_covered_ips > 0 {
+                    let pref_pct = result.stats.total_ipv4_preferred_over_coverage as f64
+                        / result.stats.input_ipv4_covered_ips as f64 * 100.0;
+                    let non_pref_pct = result.stats.total_ipv4_non_preferred_over_coverage as f64
+                        / result.stats.input_ipv4_covered_ips as f64 * 100.0;
+                    eprintln!("  Preferred: {:.2}% ({} IPs)", pref_pct, result.stats.total_ipv4_preferred_over_coverage);
+                    eprintln!("  Non-preferred: {:.2}% ({} IPs)", non_pref_pct, result.stats.total_ipv4_non_preferred_over_coverage);
+                } else {
+                    eprintln!("  Preferred: {} IPs", result.stats.total_ipv4_preferred_over_coverage);
+                    eprintln!("  Non-preferred: {} IPs", result.stats.total_ipv4_non_preferred_over_coverage);
+                }
+            }
         }
         if result.stats.total_ipv6_over_coverage > 0 {
-            eprintln!("IPv6 over-coverage: {} IPs", result.stats.total_ipv6_over_coverage);
+            if result.stats.input_ipv6_covered_ips > 0 {
+                let pct = result.stats.total_ipv6_over_coverage as f64
+                    / result.stats.input_ipv6_covered_ips as f64 * 100.0;
+                eprintln!("IPv6 over-coverage: {:.2}% ({} IPs)", pct, result.stats.total_ipv6_over_coverage);
+            } else {
+                eprintln!("IPv6 over-coverage: {} IPs", result.stats.total_ipv6_over_coverage);
+            }
+            if !cli.preferred_cidrs.is_empty() {
+                if result.stats.input_ipv6_covered_ips > 0 {
+                    let pref_pct = result.stats.total_ipv6_preferred_over_coverage as f64
+                        / result.stats.input_ipv6_covered_ips as f64 * 100.0;
+                    let non_pref_pct = result.stats.total_ipv6_non_preferred_over_coverage as f64
+                        / result.stats.input_ipv6_covered_ips as f64 * 100.0;
+                    eprintln!("  Preferred: {:.2}% ({} IPs)", pref_pct, result.stats.total_ipv6_preferred_over_coverage);
+                    eprintln!("  Non-preferred: {:.2}% ({} IPs)", non_pref_pct, result.stats.total_ipv6_non_preferred_over_coverage);
+                } else {
+                    eprintln!("  Preferred: {} IPs", result.stats.total_ipv6_preferred_over_coverage);
+                    eprintln!("  Non-preferred: {} IPs", result.stats.total_ipv6_non_preferred_over_coverage);
+                }
+            }
         }
     }
 
@@ -392,11 +499,20 @@ fn main() -> Result<()> {
                     exclusion_comment: c.exclusion_comment.clone(),
                 }).collect()
             });
+            let preferred_contributions = e.preferred_contributions.as_ref().map(|contribs| {
+                contribs.iter().map(|c| PreferredContributionJson {
+                    prefix: c.prefix.clone(),
+                    source: c.source.clone(),
+                    comment: c.comment.clone(),
+                }).collect()
+            });
             SourceMapEntry {
                 prefix: e.prefix.to_string(),
                 sources,
                 over_coverage: e.over_coverage,
+                preferred_over_coverage: e.preferred_over_coverage,
                 exclusion_collisions,
+                preferred_contributions,
             }
         }).collect();
 

@@ -1,6 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
+use crate::preferred::PreferredSet;
 use crate::trie::{BinaryTrie, NodeIdx, INVALID};
 
 /// Efficiency key comparing cost/savings via widening 160-bit multiplication.
@@ -52,14 +53,19 @@ pub fn optimize_trie(
     target: usize,
     max_ratio: Option<f64>,
     input_covered_ips: u128,
+    preferred_set: &PreferredSet,
+    max_non_preferred_ratio: Option<f64>,
 ) -> Vec<NodeIdx> {
     let mut remaining = trie.total_leaf_count();
     if remaining <= target {
         return trie.extract_leaf_indices();
     }
 
+    let has_preferred = if trie.addr_bits == 32 { !preferred_set.is_empty_v4() } else { !preferred_set.is_empty_v6() };
+
     let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
     let mut current_over_coverage: u128 = 0;
+    let mut current_non_preferred_over_coverage: u128 = 0;
 
     // Initialize heap with all internal nodes having leaf_count >= 2
     for idx in 0..trie.arena.len() {
@@ -69,7 +75,16 @@ pub fn optimize_trie(
         }
         if node.leaf_count >= 2 && !node.is_leaf {
             let cost = trie.collapse_cost(idx as u32);
-            let eff = efficiency_key(cost, node.leaf_count);
+            let descendant_collapsed = trie.arena[idx].collapsed_cost_sum;
+            let net_new = cost.saturating_sub(descendant_collapsed);
+
+            let effective_cost = if has_preferred {
+                compute_effective_cost(trie, idx as u32, net_new, preferred_set)
+            } else {
+                net_new
+            };
+
+            let eff = efficiency_key(effective_cost, node.leaf_count);
             heap.push(Reverse((eff, idx as u32, node.generation)));
         }
     }
@@ -77,14 +92,12 @@ pub fn optimize_trie(
     while remaining > target {
         let Some(Reverse((_eff, node_idx, gen))) = heap.pop() else { break };
 
-        // Bounds check: skip corrupted/invalid entries
         if node_idx as usize >= trie.arena.len() {
             continue;
         }
 
         let node = &trie.arena[node_idx as usize];
         if node.is_excluded || node.is_leaf || node.generation != gen {
-            // Heap compaction when stale entries dominate
             if heap.len() > 4 * remaining {
                 let arena = &trie.arena;
                 heap = BinaryHeap::from(
@@ -112,7 +125,22 @@ pub fn optimize_trie(
         debug_assert!(cost >= descendant_collapsed_cost);
         let net_new_over = cost.saturating_sub(descendant_collapsed_cost);
 
-        // Check ratio before collapsing
+        // Compute preferred portion of the new over-coverage
+        let preferred_in_gap = if has_preferred {
+            let (start, end) = trie.node_interval(node_idx);
+            let total_preferred_in_node = if trie.addr_bits == 32 {
+                preferred_set.overlap_count_v4(start, end)
+            } else {
+                preferred_set.overlap_count_v6(start, end)
+            };
+            // Preferred IPs in the gap = total preferred in node - preferred already covered by leaves
+            total_preferred_in_node.saturating_sub(trie.arena[node_idx as usize].preferred_overlap)
+        } else {
+            0
+        };
+        let non_preferred_in_gap = net_new_over.saturating_sub(preferred_in_gap.min(net_new_over));
+
+        // Check total ratio before collapsing
         if let Some(max_ratio) = max_ratio {
             if input_covered_ips > 0 {
                 let new_total = current_over_coverage.saturating_add(net_new_over);
@@ -122,10 +150,44 @@ pub fn optimize_trie(
             }
         }
 
+        // Check non-preferred ratio before collapsing
+        if let Some(max_np_ratio) = max_non_preferred_ratio {
+            if input_covered_ips > 0 {
+                let new_np = current_non_preferred_over_coverage.saturating_add(non_preferred_in_gap);
+                if exceeds_ratio(new_np, input_covered_ips, max_np_ratio) {
+                    break;
+                }
+            }
+        }
+
         current_over_coverage = current_over_coverage.saturating_add(net_new_over);
+        current_non_preferred_over_coverage = current_non_preferred_over_coverage.saturating_add(non_preferred_in_gap);
+
+        // Capture children's preferred_overlap_in_coverage before invalidation
+        let children_poc_sum = {
+            let children = trie.arena[node_idx as usize].children;
+            children.iter().filter(|&&c| c != INVALID)
+                .map(|&c| trie.arena[c as usize].preferred_overlap_in_coverage)
+                .sum::<u128>()
+        };
 
         trie.invalidate_subtree(node_idx);
         trie.collapse(node_idx);
+
+        // Preserve accumulated preferred_overlap_in_coverage from children
+        trie.arena[node_idx as usize].preferred_overlap_in_coverage = children_poc_sum;
+
+        // Update preferred_overlap for the collapsed node: it now covers its full interval
+        if has_preferred {
+            let (start, end) = trie.node_interval(node_idx);
+            let full_preferred = if trie.addr_bits == 32 {
+                preferred_set.overlap_count_v4(start, end)
+            } else {
+                preferred_set.overlap_count_v6(start, end)
+            };
+            trie.arena[node_idx as usize].preferred_overlap = full_preferred;
+        }
+
         remaining = remaining.saturating_sub(reduction);
 
         // Update ancestors
@@ -135,12 +197,34 @@ pub fn optimize_trie(
             trie.arena[ancestor as usize].collapsed_cost_sum = trie.arena[ancestor as usize]
                 .collapsed_cost_sum
                 .saturating_add(net_new_over);
+            // Update ancestor's preferred_overlap to reflect the collapsed node's new value
+            if has_preferred {
+                // Recompute from children
+                let children = trie.arena[ancestor as usize].children;
+                let mut total_po: u128 = 0;
+                let mut total_poc: u128 = 0;
+                for &child in &children {
+                    if child != INVALID {
+                        total_po = total_po.saturating_add(trie.arena[child as usize].preferred_overlap);
+                        total_poc = total_poc.saturating_add(trie.arena[child as usize].preferred_overlap_in_coverage);
+                    }
+                }
+                trie.arena[ancestor as usize].preferred_overlap = total_po;
+                trie.arena[ancestor as usize].preferred_overlap_in_coverage = total_poc;
+            }
             trie.arena[ancestor as usize].generation =
                 trie.arena[ancestor as usize].generation.wrapping_add(1);
             let a = &trie.arena[ancestor as usize];
             if !a.is_excluded && !a.is_leaf && a.leaf_count >= 2 {
                 let anc_cost = trie.collapse_cost(ancestor);
-                let anc_eff = efficiency_key(anc_cost, a.leaf_count);
+                let anc_descendant = a.collapsed_cost_sum;
+                let anc_net_new = anc_cost.saturating_sub(anc_descendant);
+                let anc_effective = if has_preferred {
+                    compute_effective_cost(trie, ancestor, anc_net_new, preferred_set)
+                } else {
+                    anc_net_new
+                };
+                let anc_eff = efficiency_key(anc_effective, a.leaf_count);
                 heap.push(Reverse((anc_eff, ancestor, a.generation)));
             }
             ancestor = trie.arena[ancestor as usize].parent;
@@ -148,6 +232,18 @@ pub fn optimize_trie(
     }
 
     trie.extract_leaf_indices()
+}
+
+/// Compute effective cost discounting preferred overlap in the gap.
+fn compute_effective_cost(trie: &BinaryTrie, node_idx: NodeIdx, net_new_over: u128, preferred_set: &PreferredSet) -> u128 {
+    let (start, end) = trie.node_interval(node_idx);
+    let total_preferred_in_node = if trie.addr_bits == 32 {
+        preferred_set.overlap_count_v4(start, end)
+    } else {
+        preferred_set.overlap_count_v6(start, end)
+    };
+    let preferred_in_gap = total_preferred_in_node.saturating_sub(trie.arena[node_idx as usize].preferred_overlap);
+    net_new_over.saturating_sub(preferred_in_gap.min(net_new_over))
 }
 
 /// Integer-scaled ratio check for overflow safety with large IPv6 values.
@@ -170,6 +266,7 @@ pub fn exceeds_ratio(over: u128, covered: u128, max_ratio: f64) -> bool {
 mod tests {
     use super::*;
     use crate::lossless::SourceMapPrefix;
+    use crate::preferred::PreferredSet;
 
     #[test]
     fn efficiency_key_ordering() {
@@ -195,50 +292,48 @@ mod tests {
 
     #[test]
     fn exceeds_ratio_zero_covered() {
-        // With covered=0, ratio check should not be triggered (handled by caller)
-        // But if called, should not panic
         assert!(!exceeds_ratio(0, 0, 0.05));
     }
 
     #[test]
     fn optimize_small_trie_to_target() {
         let entries = vec![
-            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128 },
-            SourceMapPrefix { prefix: "10.0.0.128/25".parse().unwrap(), source_indices: vec![1], coverage: 128 },
-            SourceMapPrefix { prefix: "10.0.1.0/25".parse().unwrap(), source_indices: vec![2], coverage: 128 },
-            SourceMapPrefix { prefix: "10.0.1.128/25".parse().unwrap(), source_indices: vec![3], coverage: 128 },
+            SourceMapPrefix { prefix: "10.0.0.0/25".parse().unwrap(), source_indices: vec![0], coverage: 128, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.0.128/25".parse().unwrap(), source_indices: vec![1], coverage: 128, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.1.0/25".parse().unwrap(), source_indices: vec![2], coverage: 128, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.1.128/25".parse().unwrap(), source_indices: vec![3], coverage: 128, preferred_overlap_in_coverage: 0 },
         ];
         let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
         assert_eq!(trie.total_leaf_count(), 4);
 
-        let _leaves = optimize_trie(&mut trie, 2, None, 512);
+        let empty_pref = PreferredSet::build(&[]);
+        let _leaves = optimize_trie(&mut trie, 2, None, 512, &empty_pref, None);
         assert!(trie.total_leaf_count() <= 2);
     }
 
     #[test]
     fn optimize_target_already_met() {
         let entries = vec![
-            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
-            SourceMapPrefix { prefix: "10.0.1.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.1.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256, preferred_overlap_in_coverage: 0 },
         ];
         let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
-        let _leaves = optimize_trie(&mut trie, 5, None, 512);
+        let empty_pref = PreferredSet::build(&[]);
+        let _leaves = optimize_trie(&mut trie, 5, None, 512, &empty_pref, None);
         assert_eq!(trie.total_leaf_count(), 2);
     }
 
     #[test]
     fn optimize_with_ratio_cap() {
-        // 4 /32 entries scattered — collapsing would create huge over-coverage
         let entries = vec![
-            SourceMapPrefix { prefix: "10.0.0.1/32".parse().unwrap(), source_indices: vec![0], coverage: 1 },
-            SourceMapPrefix { prefix: "10.0.0.2/32".parse().unwrap(), source_indices: vec![1], coverage: 1 },
-            SourceMapPrefix { prefix: "192.168.0.1/32".parse().unwrap(), source_indices: vec![2], coverage: 1 },
-            SourceMapPrefix { prefix: "192.168.0.2/32".parse().unwrap(), source_indices: vec![3], coverage: 1 },
+            SourceMapPrefix { prefix: "10.0.0.1/32".parse().unwrap(), source_indices: vec![0], coverage: 1, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.0.2/32".parse().unwrap(), source_indices: vec![1], coverage: 1, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "192.168.0.1/32".parse().unwrap(), source_indices: vec![2], coverage: 1, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "192.168.0.2/32".parse().unwrap(), source_indices: vec![3], coverage: 1, preferred_overlap_in_coverage: 0 },
         ];
         let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
-        // With very strict ratio (0.0), no merging should happen
-        let _leaves = optimize_trie(&mut trie, 1, Some(0.0), 4);
-        // Should still have 4 leaves since ratio=0 prevents any merge
+        let empty_pref = PreferredSet::build(&[]);
+        let _leaves = optimize_trie(&mut trie, 1, Some(0.0), 4, &empty_pref, None);
         assert_eq!(trie.total_leaf_count(), 4);
     }
 
@@ -247,7 +342,6 @@ mod tests {
         assert_eq!(widening_mul_u128_u32(1, 1), (0, 1));
         assert_eq!(widening_mul_u128_u32(u128::MAX, 1), (0, u128::MAX));
         let (hi, lo) = widening_mul_u128_u32(u128::MAX, 2);
-        // u128::MAX * 2 = 2^129 - 2 = (1, 2^128 - 2) in (high, low)
         assert_eq!(hi, 1);
         assert_eq!(lo, u128::MAX - 1);
     }
@@ -258,23 +352,15 @@ mod tests {
         use crate::trie::BinaryTrie;
         use crate::types::ExclusionEntry;
 
-        // Two pairs of siblings that merge to /24s:
-        //   10.0.0.0/25 + 10.0.0.128/25 → 10.0.0.0/24
-        //   10.0.1.0/25 + 10.0.1.128/25 → 10.0.1.0/24
-        // Then the two /24s merge to 10.0.0.0/23
-        // Coverage at /23 = 512 = capacity, so exclusion within /23 won't trigger
-        // We need a scenario where coverage < capacity at the merge point.
-        //
-        // Use: 10.0.0.0/24 and 10.0.2.0/24 — these share a /22 parent (10.0.0.0/22)
-        // The /22 has capacity=1024 but coverage=512, so exclusion in the gap triggers
         let entries = vec![
-            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256 },
-            SourceMapPrefix { prefix: "10.0.2.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256 },
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.2.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256, preferred_overlap_in_coverage: 0 },
         ];
 
         // Without exclusion: target=1 merges to /22
         let mut trie_no_excl = BinaryTrie::build_from_v4(&entries).unwrap();
-        let _leaves = optimize_trie(&mut trie_no_excl, 1, None, 512);
+        let empty_pref = PreferredSet::build(&[]);
+        let _leaves = optimize_trie(&mut trie_no_excl, 1, None, 512, &empty_pref, None);
         assert_eq!(trie_no_excl.total_leaf_count(), 1);
 
         // With exclusion of 10.0.1.0/24 (in the /22 gap, not covered by input)
@@ -287,8 +373,62 @@ mod tests {
         let set = ExclusionSet::build(&excl);
         trie.mark_exclusions(&set, true);
 
-        let _leaves = optimize_trie(&mut trie, 1, None, 512);
-        // The /22 merge is blocked because it would cover 10.0.1.0/24 (excluded)
+        let _leaves = optimize_trie(&mut trie, 1, None, 512, &empty_pref, None);
         assert_eq!(trie.total_leaf_count(), 2);
+    }
+
+    #[test]
+    fn optimize_with_preferred_biases_merge() {
+        use crate::types::PreferredEntry;
+
+        // Two /24s with a gap: 10.0.0.0/24 and 10.0.2.0/24
+        // Gap is 10.0.1.0/24 (256 IPs). Preferred covers the gap.
+        let entries = vec![
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.2.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256, preferred_overlap_in_coverage: 0 },
+        ];
+
+        let preferred = vec![PreferredEntry {
+            prefix: "10.0.1.0/24".parse().unwrap(),
+            source: "test".into(),
+            comment: None,
+        }];
+        let pref_set = PreferredSet::build(&preferred);
+
+        let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
+        trie.mark_preferred_overlaps(&pref_set, true);
+        let _leaves = optimize_trie(&mut trie, 1, None, 512, &pref_set, None);
+        // Should merge since preferred covers the gap
+        assert_eq!(trie.total_leaf_count(), 1);
+    }
+
+    #[test]
+    fn optimize_max_non_preferred_ratio_blocks() {
+        use crate::types::PreferredEntry;
+
+        // Two /24s: 10.0.0.0/24 and 10.0.2.0/24. Gap = 10.0.1.0/24 + 10.0.3.0/24 at /22 level.
+        // Preferred covers 10.0.1.0/24 but not 10.0.3.0/24.
+        // With max_non_preferred_ratio=0, merging to /22 should be blocked (non-preferred gap exists).
+        let entries = vec![
+            SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256, preferred_overlap_in_coverage: 0 },
+            SourceMapPrefix { prefix: "10.0.2.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256, preferred_overlap_in_coverage: 0 },
+        ];
+
+        let preferred = vec![PreferredEntry {
+            prefix: "10.0.1.0/24".parse().unwrap(),
+            source: "test".into(),
+            comment: None,
+        }];
+        let pref_set = PreferredSet::build(&preferred);
+
+        let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
+        trie.mark_preferred_overlaps(&pref_set, true);
+        // max_non_preferred_ratio=0 means no non-preferred over-coverage allowed
+        let _leaves = optimize_trie(&mut trie, 1, None, 512, &pref_set, Some(0.0));
+        // The /23 merge (10.0.0.0/23) has gap=10.0.1.0/24 which is fully preferred → allowed
+        // But to get to 1 entry we'd need /22 which has non-preferred gap → blocked
+        // Actually /23 merge of 10.0.0.0/24 + 10.0.1.0/24 doesn't help since 10.0.1.0/24 isn't input.
+        // The two inputs share a /22 parent. Let's just verify it doesn't collapse to 1.
+        assert!(trie.total_leaf_count() >= 2);
     }
 }

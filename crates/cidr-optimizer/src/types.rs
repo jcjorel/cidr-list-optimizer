@@ -56,6 +56,22 @@ pub struct ExclusionEntry {
     pub comment: Option<String>,
 }
 
+/// A single preferred over-coverage entry: widening into this space is discounted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreferredEntry {
+    pub prefix: IpNet,
+    pub source: String,
+    pub comment: Option<String>,
+}
+
+/// Records which preferred CIDR contributed to a widening discount (for source-map).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreferredContribution {
+    pub prefix: String,
+    pub source: String,
+    pub comment: Option<String>,
+}
+
 /// Records a collision between an input prefix and an exclusion entry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExclusionCollision {
@@ -74,6 +90,8 @@ pub struct OptimizerConfig {
     pub max_input_entries: usize,
     pub source_map: bool,
     pub exclusions: Vec<ExclusionEntry>,
+    pub preferred_cidrs: Vec<PreferredEntry>,
+    pub max_non_preferred_over_coverage_ratio: Option<f64>,
 }
 
 impl Default for OptimizerConfig {
@@ -87,6 +105,8 @@ impl Default for OptimizerConfig {
             max_input_entries: 10_000_000,
             source_map: false,
             exclusions: Vec::new(),
+            preferred_cidrs: Vec::new(),
+            max_non_preferred_over_coverage_ratio: None,
         }
     }
 }
@@ -111,6 +131,8 @@ pub struct AggregatedEntry {
     pub source_indices: Option<Vec<usize>>,
     pub over_coverage: u128,
     pub exclusion_collisions: Option<Vec<ExclusionCollision>>,
+    pub preferred_over_coverage: u128,
+    pub preferred_contributions: Option<Vec<PreferredContribution>>,
 }
 
 pub struct OptimizationResult {
@@ -131,6 +153,12 @@ pub struct OptimizationStats {
     pub ipv6_target_binding: bool,
     pub ipv4_exclusion_constrained: bool,
     pub ipv6_exclusion_constrained: bool,
+    pub total_ipv4_preferred_over_coverage: u128,
+    pub total_ipv6_preferred_over_coverage: u128,
+    pub total_ipv4_non_preferred_over_coverage: u128,
+    pub total_ipv6_non_preferred_over_coverage: u128,
+    pub input_ipv4_covered_ips: u128,
+    pub input_ipv6_covered_ips: u128,
 }
 
 /// A single input entry with its original text and optional inline comment.
