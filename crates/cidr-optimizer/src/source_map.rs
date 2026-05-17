@@ -7,15 +7,17 @@ pub fn compute_source_map_v4(
     output: &[Ipv4Net],
     sorted_input: &[(usize, Ipv4Net)],
 ) -> Vec<Vec<usize>> {
+    // Map each output prefix to the list of original input indices it covers
     output
         .iter()
         .map(|out| {
             let out_start = u32::from(out.network());
             let out_end = u32::from(out.broadcast());
-            // Binary search for first input whose network >= out.network()
+            // Narrow search window: skip inputs starting before this output prefix
             let start = sorted_input.partition_point(|(_, p)| u32::from(p.network()) < out_start);
-            // Binary search for first input whose network > out.broadcast()
+            // Upper bound: first input that starts beyond this output prefix's range
             let end = sorted_input.partition_point(|(_, p)| u32::from(p.network()) <= out_end);
+            // Binary search only bounds by start address; filter out inputs that extend past the output prefix
             sorted_input[start..end]
                 .iter()
                 .filter(|(_, p)| contains_v4(out, p))
@@ -30,13 +32,17 @@ pub fn compute_source_map_v6(
     output: &[Ipv6Net],
     sorted_input: &[(usize, Ipv6Net)],
 ) -> Vec<Vec<usize>> {
+    // Map each output prefix to the list of original input indices it covers
     output
         .iter()
         .map(|out| {
             let out_start = u128::from(out.network());
             let out_broadcast = broadcast_v6(out);
+            // Narrow search window: skip inputs starting before this output prefix
             let start = sorted_input.partition_point(|(_, p)| u128::from(p.network()) < out_start);
+            // Upper bound: first input that starts beyond this output prefix's range
             let end = sorted_input.partition_point(|(_, p)| u128::from(p.network()) <= out_broadcast);
+            // Binary search only bounds by start address; filter out inputs that extend past the output prefix
             sorted_input[start..end]
                 .iter()
                 .filter(|(_, p)| contains_v6(out, p))
@@ -46,29 +52,39 @@ pub fn compute_source_map_v6(
         .collect()
 }
 
+/// Returns true if `inner` is fully contained within `outer` (prefix containment check).
 fn contains_v4(outer: &Ipv4Net, inner: &Ipv4Net) -> bool {
+    // A more-specific outer cannot contain a less-specific inner
     if outer.prefix_len() > inner.prefix_len() {
         return false;
     }
+    // Mask isolates the network portion; /0 trivially contains everything
     let mask = if outer.prefix_len() == 0 { 0 } else { !0u32 << (32 - outer.prefix_len()) };
     (u32::from(outer.network()) & mask) == (u32::from(inner.network()) & mask)
 }
 
+/// Returns true if `inner` IPv6 prefix is fully contained within `outer`.
 fn contains_v6(outer: &Ipv6Net, inner: &Ipv6Net) -> bool {
+    // A more-specific outer cannot contain a less-specific inner
     if outer.prefix_len() > inner.prefix_len() {
         return false;
     }
+    // Mask isolates the network portion; /0 trivially contains everything
     let mask = if outer.prefix_len() == 0 { 0 } else { !0u128 << (128 - outer.prefix_len()) };
     (u128::from(outer.network()) & mask) == (u128::from(inner.network()) & mask)
 }
 
+/// Computes the broadcast (last) address of an IPv6 network as u128.
 fn broadcast_v6(net: &Ipv6Net) -> u128 {
     let bits = u128::from(net.network());
+    // Edge case: /0 means all bits are host bits; the shift in the general formula would overflow (128-bit shift), so return MAX directly
     if net.prefix_len() == 0 {
         u128::MAX
+    // /128 is a host route — broadcast equals network
     } else if net.prefix_len() == 128 {
         bits
     } else {
+        // General case (/1–/127): fill host portion with ones to get the last address
         bits | ((1u128 << (128 - net.prefix_len())) - 1)
     }
 }

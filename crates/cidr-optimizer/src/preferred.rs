@@ -1,21 +1,25 @@
+//! Preferred-entry overlap detection using sorted interval sets with binary-search pruning.
+
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 use crate::lossless;
 use crate::lossless::SourceMapPrefix;
 use crate::types::PreferredEntry;
 
-/// Sorted non-overlapping intervals for O(log E) overlap-count queries.
+/// Sorted non-overlapping intervals (post-aggregation) for binary-search-pruned overlap queries.
 pub struct PreferredSet {
     ipv4_ranges: Vec<(u128, u128)>,
     ipv6_ranges: Vec<(u128, u128)>,
 }
 
 impl PreferredSet {
-    /// Build from preferred entries using lossless aggregation.
+    /// Build from preferred entries, applying lossless aggregation to produce non-overlapping
+    /// intervals that prevent double-counting in overlap queries.
     pub fn build(entries: &[PreferredEntry]) -> Self {
         let mut v4_input: Vec<(usize, Ipv4Net)> = Vec::new();
         let mut v6_input: Vec<(usize, Ipv6Net)> = Vec::new();
 
+        // Partition entries by address family for separate aggregation
         for (i, entry) in entries.iter().enumerate() {
             match entry.prefix {
                 IpNet::V4(v4) => v4_input.push((i, v4.trunc())),
@@ -43,6 +47,10 @@ impl PreferredSet {
     }
 
     /// Find original preferred entries whose prefix intersects the candidate IPv4 interval.
+    ///
+    /// Uses a linear scan of original entries (not the pre-built interval index) because
+    /// callers need references to `PreferredEntry` structs with source/comment metadata
+    /// that the sorted interval vectors discard.
     pub fn find_overlapping_v4<'a>(
         &self,
         entries: &'a [PreferredEntry],
@@ -53,6 +61,10 @@ impl PreferredSet {
     }
 
     /// Find original preferred entries whose prefix intersects the candidate IPv6 interval.
+    ///
+    /// Uses a linear scan of original entries (not the pre-built interval index) because
+    /// callers need references to `PreferredEntry` structs with source/comment metadata
+    /// that the sorted interval vectors discard.
     pub fn find_overlapping_v6<'a>(
         &self,
         entries: &'a [PreferredEntry],
@@ -62,22 +74,27 @@ impl PreferredSet {
         Self::find_overlapping(entries, candidate_start, candidate_end, false)
     }
 
+    /// Returns true if no IPv4 preferred ranges exist.
     pub fn is_empty_v4(&self) -> bool {
         self.ipv4_ranges.is_empty()
     }
 
+    /// Returns true if no IPv6 preferred ranges exist.
     pub fn is_empty_v6(&self) -> bool {
         self.ipv6_ranges.is_empty()
     }
 
+    /// Sum the number of IPs in [candidate_start, candidate_end] that fall within any stored interval.
     fn overlap_count(ranges: &[(u128, u128)], candidate_start: u128, candidate_end: u128) -> u128 {
+        // Uses partition_point for binary search to find the upper bound of potentially
+        // overlapping intervals, then linearly scans those intervals to sum overlap.
         if ranges.is_empty() {
             return 0;
         }
-        // Find first range whose start > candidate_end (all before this may overlap)
         let upper = ranges.partition_point(|&(start, _)| start <= candidate_end);
         let mut total: u128 = 0;
         for &(start, end) in &ranges[..upper] {
+            // Skip intervals that end before the candidate starts
             if end < candidate_start {
                 continue;
             }
@@ -88,6 +105,8 @@ impl PreferredSet {
         total
     }
 
+    /// Linear scan of entries to find those whose prefix intersects [candidate_start, candidate_end].
+    /// Uses original entries (not the pre-built index) to return references to PreferredEntry structs.
     fn find_overlapping(
         entries: &[PreferredEntry],
         candidate_start: u128,
@@ -97,6 +116,7 @@ impl PreferredSet {
         entries
             .iter()
             .filter(|e| {
+                // Compute start/end for the entry's address family, skip mismatched families
                 let (start, end) = match &e.prefix {
                     IpNet::V4(v4) if is_v4 => {
                         (u32::from(v4.network()) as u128, u32::from(v4.broadcast()) as u128)
@@ -104,6 +124,7 @@ impl PreferredSet {
                     IpNet::V6(v6) if !is_v4 => {
                         let s = u128::from(v6.network());
                         let pl = v6.prefix_len();
+                        // Compute broadcast equivalent: set all host bits to 1
                         let e = if pl == 128 { s } else if pl == 0 { u128::MAX } else { s | ((1u128 << (128 - pl)) - 1) };
                         (s, e)
                     }
@@ -114,7 +135,9 @@ impl PreferredSet {
             .collect()
     }
 
+    /// Convert aggregated IPv4 prefixes into sorted numeric intervals for binary search.
     fn to_intervals_v4(agg: &[SourceMapPrefix<Ipv4Net>]) -> Vec<(u128, u128)> {
+        // Numeric intervals enable binary-search-based overlap queries
         let mut intervals: Vec<(u128, u128)> = agg
             .iter()
             .map(|e| {
@@ -123,16 +146,20 @@ impl PreferredSet {
                 (start, end)
             })
             .collect();
+        // Sorted order is required for partition_point binary search in overlap_count
         intervals.sort_unstable_by_key(|&(s, _)| s);
         intervals
     }
 
+    /// Convert aggregated IPv6 prefixes into sorted numeric intervals for binary search.
     fn to_intervals_v6(agg: &[SourceMapPrefix<Ipv6Net>]) -> Vec<(u128, u128)> {
+        // Same approach as to_intervals_v4 but with 128-bit address arithmetic
         let mut intervals: Vec<(u128, u128)> = agg
             .iter()
             .map(|e| {
                 let start = u128::from(e.prefix.network());
                 let pl = e.prefix.prefix_len();
+                // Handle edge cases: /128 is a single address, /0 spans the entire address space
                 let end = if pl == 128 {
                     start
                 } else if pl == 0 {

@@ -1,3 +1,6 @@
+//! Core optimization orchestration: partitions input by address family, runs lossless
+//! then budget-constrained lossy optimization, and assembles auditable results.
+
 pub mod types;
 pub mod error;
 pub mod parser;
@@ -34,11 +37,14 @@ pub fn optimize(
 }
 
 /// With progress callback and cancellation support.
+///
+/// Phases: validate → partition → lossless → lossy → build result → source-map → coverage check
 pub fn optimize_with_progress(
     prefixes: &[IpNet],
     config: &OptimizerConfig,
     mut progress: impl FnMut(Phase) -> ControlFlow<()>,
 ) -> Result<OptimizationResult, OptimizeError> {
+    // Reject inputs exceeding the configured safety limit
     if prefixes.len() > config.max_input_entries {
         return Err(OptimizeError::InputTooLarge {
             count: prefixes.len(),
@@ -50,10 +56,12 @@ pub fn optimize_with_progress(
 
     let (ipv4, ipv6) = partition_with_indices(prefixes);
 
+    // No usable prefixes after partitioning
     if ipv4.is_empty() && ipv6.is_empty() {
         return Err(OptimizeError::EmptyInput);
     }
 
+    // Zero-target with non-empty input is nonsensical
     if let Some(TargetSpec::EntryCount(0)) = config.ipv4_target {
         if !ipv4.is_empty() {
             return Err(OptimizeError::TargetTooSmall { target: 0, minimum: 1 });
@@ -78,6 +86,7 @@ pub fn optimize_with_progress(
     }
     let lossless_v6 = lossless::lossless_aggregate_v6(ipv6, config.max_prefix_len_v6);
 
+    // Determine whether the target is actually constraining (lossless result exceeds target)
     let ipv4_target_binding = matches!(config.ipv4_target, Some(TargetSpec::EntryCount(t)) if lossless_v4.len() > t);
     let ipv6_target_binding = matches!(config.ipv6_target, Some(TargetSpec::EntryCount(t)) if lossless_v6.len() > t);
 
@@ -91,6 +100,7 @@ pub fn optimize_with_progress(
     let input_ipv4_covered_ips = compute_covered_ips_v4(&lossless_v4);
     let input_ipv6_covered_ips = compute_covered_ips_v6(&lossless_v6);
 
+    // Dispatch: run lossy optimization only when target is binding or over-coverage mode is active
     let output_v4 = match config.ipv4_target {
         Some(TargetSpec::EntryCount(target)) if lossless_v4.len() > target => {
             if progress(Phase::Lossy { af: AddressFamily::IPv4, current_count: lossless_v4.len(), target }) == ControlFlow::Break(()) {
@@ -107,6 +117,7 @@ pub fn optimize_with_progress(
         _ => lossless_v4,
     };
 
+    // Same dispatch logic for IPv6
     let output_v6 = match config.ipv6_target {
         Some(TargetSpec::EntryCount(target)) if lossless_v6.len() > target => {
             if progress(Phase::Lossy { af: AddressFamily::IPv6, current_count: lossless_v6.len(), target }) == ControlFlow::Break(()) {
@@ -125,7 +136,7 @@ pub fn optimize_with_progress(
 
     let _ = progress(Phase::Done);
 
-    // Detect exclusion-constrained: target was set but not met, and exclusions are active
+    // Check if exclusion zones prevented reaching the entry target
     let ipv4_exclusion_constrained = match config.ipv4_target {
         Some(TargetSpec::EntryCount(target)) => {
             output_v4.len() > target && !exclusion_set.is_empty_v4()
@@ -148,10 +159,11 @@ pub fn optimize_with_progress(
         input_ipv6_covered_ips,
     )?;
 
-    // Detect input/exclusion collisions
+    // Annotate output entries with any exclusion zones they overlap
     if !config.exclusions.is_empty() {
         for entry in &mut result.entries {
             let (start, end) = prefix_to_interval(&entry.prefix);
+            // Map intersecting exclusion entries to collision metadata
             let collisions: Vec<ExclusionCollision> = match &entry.prefix {
                 IpNet::V4(_) => exclusion_set
                     .find_intersecting_v4(&config.exclusions, start, end)
@@ -178,14 +190,16 @@ pub fn optimize_with_progress(
         }
     }
 
-    // Populate source-map via binary search when enabled
+    // Populate source-map: trace each output CIDR back to its input indices
     if config.source_map {
         let (sorted_v4, sorted_v6) = partition_with_indices(prefixes);
         let mut sorted_v4 = sorted_v4;
         let mut sorted_v6 = sorted_v6;
+        // Sort inputs by network address for binary-search-based source-map computation
         sorted_v4.sort_by_key(|(_, p)| u32::from(p.network()));
         sorted_v6.sort_by_key(|(_, p)| u128::from(p.network()));
 
+        // Extract typed prefix vectors for source-map lookup
         let output_v4_nets: Vec<Ipv4Net> = result.entries.iter()
             .filter_map(|e| if let IpNet::V4(v4) = e.prefix { Some(v4) } else { None })
             .collect();
@@ -196,6 +210,7 @@ pub fn optimize_with_progress(
         let prov_v4 = source_map::compute_source_map_v4(&output_v4_nets, &sorted_v4);
         let prov_v6 = source_map::compute_source_map_v6(&output_v6_nets, &sorted_v6);
 
+        // Assign source-map indices to each output entry by address family
         let mut v4_idx = 0;
         let mut v6_idx = 0;
         for entry in &mut result.entries {
@@ -215,17 +230,20 @@ pub fn optimize_with_progress(
             }
         }
 
-        // Populate preferred contributions for source-map when preferred CIDRs are active
+        // Annotate entries with preferred-CIDR contributions when preferred mode is active
         if !config.preferred_cidrs.is_empty() {
             for entry in &mut result.entries {
+                // Skip entries with no over-coverage (no preferred contribution possible)
                 if entry.over_coverage == 0 {
                     continue;
                 }
                 let (start, end) = prefix_to_interval(&entry.prefix);
+                // Find preferred CIDRs overlapping this entry's address range
                 let overlapping = match &entry.prefix {
                     IpNet::V4(_) => preferred_set.find_overlapping_v4(&config.preferred_cidrs, start, end),
                     IpNet::V6(_) => preferred_set.find_overlapping_v6(&config.preferred_cidrs, start, end),
                 };
+                // Record which preferred CIDRs contributed to this entry's over-coverage
                 if !overlapping.is_empty() {
                     entry.preferred_contributions = Some(
                         overlapping.into_iter().map(|p| types::PreferredContribution {
@@ -239,7 +257,7 @@ pub fn optimize_with_progress(
         }
     }
 
-    // Safety invariant: output MUST cover all input prefixes
+    // Final safety check: every input prefix must be covered by at least one output
     if !validate_coverage(prefixes, &result.entries) {
         return Err(OptimizeError::CoverageLost);
     }
@@ -247,12 +265,17 @@ pub fn optimize_with_progress(
     Ok(result)
 }
 
-/// Convenience: parse from reader then optimize.
+/// Parse CIDR entries from a reader and optimize in one step.
+///
+/// Wraps `parse_input` + `optimize`, returning both the optimization result and
+/// input metadata (original text, comments) needed for source-map output.
+/// Returns `OptimizerError` which may contain either parse errors or optimization errors.
 pub fn optimize_from_reader(
     input: impl BufRead,
     config: &OptimizerConfig,
 ) -> Result<ReaderResult, OptimizerError> {
     let parsed = parser::parse_input(input, config.source_map, config.max_input_entries)?;
+    // Combine parsed IPv4 and IPv6 into a unified IpNet vector
     let prefixes: Vec<IpNet> = parsed
         .ipv4
         .iter()
@@ -270,6 +293,7 @@ pub fn optimize_from_reader(
 }
 
 fn validate_config(config: &OptimizerConfig) -> Result<(), OptimizeError> {
+    // Validate prefix length bounds
     if config.max_prefix_len_v4 == 0 || config.max_prefix_len_v4 > 32 {
         return Err(OptimizeError::InvalidConfig {
             message: format!("max_prefix_len_v4 ({}) must be in [1, 32]", config.max_prefix_len_v4),
@@ -280,6 +304,7 @@ fn validate_config(config: &OptimizerConfig) -> Result<(), OptimizeError> {
             message: format!("max_prefix_len_v6 ({}) must be in [1, 128]", config.max_prefix_len_v6),
         });
     }
+    // Validate over-coverage ratio range
     if let Some(r) = config.max_over_coverage_ratio {
         if !(0.0..=10.0).contains(&r) {
             return Err(OptimizeError::InvalidConfig {
@@ -299,7 +324,7 @@ fn validate_config(config: &OptimizerConfig) -> Result<(), OptimizeError> {
             });
         }
     }
-    // Validate TargetSpec::MaxOverCoverage ratios
+    // MaxOverCoverage target conflicts with global ratio cap
     for (label, target) in [("ipv4_target", &config.ipv4_target), ("ipv6_target", &config.ipv6_target)] {
         if let Some(TargetSpec::MaxOverCoverage(ratio)) = target {
             if *ratio <= 0.0 || *ratio > 10.0 {
@@ -318,6 +343,10 @@ fn validate_config(config: &OptimizerConfig) -> Result<(), OptimizeError> {
     Ok(())
 }
 
+/// Partition prefixes by address family, pairing each with its original index.
+///
+/// Each prefix is truncated to its canonical network form via `.trunc()` so that
+/// non-canonical inputs (e.g., `10.0.0.1/24`) are normalized before aggregation.
 #[allow(clippy::type_complexity)]
 fn partition_with_indices(prefixes: &[IpNet]) -> (Vec<(usize, Ipv4Net)>, Vec<(usize, Ipv6Net)>) {
     let mut ipv4 = Vec::new();
@@ -332,15 +361,19 @@ fn partition_with_indices(prefixes: &[IpNet]) -> (Vec<(usize, Ipv4Net)>, Vec<(us
 }
 
 fn compute_covered_ips_v4(lossless: &[SourceMapPrefix<Ipv4Net>]) -> u128 {
+    // Sum the address-space size of each prefix (2^(32-prefix_len))
     lossless.iter().map(|e| {
         let pl = e.prefix.prefix_len();
+        // Special-case /32: 2^0 = 1 works but explicit for clarity
         if pl == 32 { 1u128 } else { 1u128 << (32 - pl) }
     }).sum()
 }
 
 fn compute_covered_ips_v6(lossless: &[SourceMapPrefix<Ipv6Net>]) -> u128 {
+    // Sum IPv6 address counts with saturating arithmetic to avoid overflow
     lossless.iter().map(|e| {
         let pl = e.prefix.prefix_len();
+        // Guard: shifting by ≥128 panics in debug (wraps in release); treat /0 as covering the full u128 space
         if pl == 128 { 1u128 } else if (128 - pl) >= 128 { u128::MAX } else { 1u128 << (128 - pl) }
     }).fold(0u128, |acc, v| acc.saturating_add(v))
 }
@@ -385,6 +418,9 @@ fn lossy_optimize_v6(
     Ok(trie.extract_leaves_v6())
 }
 
+/// Assemble the final optimization result from output prefix lists.
+///
+/// Phases: compute per-entry over-coverage → accumulate stats → sort entries → assemble result.
 #[allow(clippy::too_many_arguments)]
 fn build_result(
     output_v4: Vec<SourceMapPrefix<Ipv4Net>>,
@@ -472,7 +508,7 @@ fn build_result(
         1.0
     };
 
-    // Sort: IPv4 first by network addr, then IPv6 by network addr
+    // Deterministic output order: IPv4 sorted by network address, then IPv6
     entries.sort_by(|a, b| match (&a.prefix, &b.prefix) {
         (IpNet::V4(a4), IpNet::V4(b4)) => {
             u32::from(a4.network()).cmp(&u32::from(b4.network()))
@@ -511,7 +547,10 @@ fn build_result(
     })
 }
 
-/// Convert a prefix to its (start, end) interval for collision detection.
+/// Convert a prefix to its inclusive (start, end) interval for collision detection.
+///
+/// Both IPv4 and IPv6 are represented as u128 values; IPv4 addresses occupy the
+/// low 32 bits (no shift), enabling uniform interval arithmetic across families.
 fn prefix_to_interval(prefix: &IpNet) -> (u128, u128) {
     match prefix {
         IpNet::V4(v4) => {
@@ -554,6 +593,7 @@ pub fn validate_coverage(input: &[IpNet], output: &[AggregatedEntry]) -> bool {
     v4_prefixes.sort_by_key(|p| (u32::from(p.network()), p.prefix_len()));
     v6_prefixes.sort_by_key(|p| (u128::from(p.network()), p.prefix_len()));
 
+    // Every input must be contained by at least one output prefix
     input.iter().all(|inp| match inp {
         IpNet::V4(v4) => is_covered_v4(*v4, &v4_prefixes),
         IpNet::V6(v6) => is_covered_v6(*v6, &v6_prefixes),
@@ -591,6 +631,7 @@ fn is_covered_v6(needle: Ipv6Net, sorted: &[Ipv6Net]) -> bool {
     let needle_bcast = u128::from(needle.broadcast());
 
     let idx = sorted.partition_point(|p| u128::from(p.network()) <= needle_net);
+    // Scan backwards from insertion point checking containment
     for i in (0..idx).rev() {
         let p = &sorted[i];
         let p_net = u128::from(p.network());

@@ -1,3 +1,5 @@
+//! CIDR input parsing — reads text lines into structured, validated prefix entries.
+
 use std::io::BufRead;
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
@@ -28,6 +30,7 @@ pub fn parse_cidrs(input: impl BufRead) -> Result<Vec<ParsedCidr>, OptimizerErro
     let mut line_num: usize = 0;
     let mut reader = input;
 
+    // Streaming parse: process one line at a time to bound memory usage regardless of input size
     loop {
         line_buf.clear();
         let bytes_read = reader.read_line(&mut line_buf)?;
@@ -36,6 +39,7 @@ pub fn parse_cidrs(input: impl BufRead) -> Result<Vec<ParsedCidr>, OptimizerErro
         }
         line_num += 1;
 
+        // Reject oversized lines to prevent memory-based DoS
         if line_buf.len() > MAX_LINE_BYTES {
             return Err(OptimizerError::Parse {
                 line: line_num,
@@ -49,20 +53,22 @@ pub fn parse_cidrs(input: impl BufRead) -> Result<Vec<ParsedCidr>, OptimizerErro
             continue;
         }
 
-        // Split on first '#' to separate CIDR from inline comment
+        // Split on first '#' only — subsequent '#' characters are part of the comment text
         let (cidr_part, comment) = if let Some(hash_pos) = trimmed.find('#') {
             let cidr = trimmed[..hash_pos].trim();
             let raw_comment = trimmed[hash_pos + 1..].trim();
-            let comment = if raw_comment.is_empty() { None } else { Some(raw_comment.to_string()) };
+            let comment = if raw_comment.is_empty() { None } else { Some(raw_comment.to_string()) }; // Treat trailing '#' with no text as no comment
             (cidr, comment)
         } else {
             (trimmed, None)
         };
 
+        // Bare IPs need promotion to /32 or /128; CIDR notation parses directly
         let parsed: Result<IpNet, String> = if cidr_part.contains('/') {
             cidr_part.parse::<IpNet>().map_err(|e| e.to_string())
         } else {
             use std::net::IpAddr;
+            // Infallible: host-prefix construction cannot fail for valid addresses
             match cidr_part.parse::<IpAddr>() {
                 Ok(IpAddr::V4(ip)) => Ok(IpNet::V4(Ipv4Net::new(ip, 32).unwrap())),
                 Ok(IpAddr::V6(ip)) => Ok(IpNet::V6(Ipv6Net::new(ip, 128).unwrap())),
@@ -73,7 +79,7 @@ pub fn parse_cidrs(input: impl BufRead) -> Result<Vec<ParsedCidr>, OptimizerErro
         match parsed {
             Ok(net) => {
                 let raw_text = cidr_part.to_string();
-                // Normalize non-canonical prefixes
+                // Normalize non-canonical prefixes by truncating host bits
                 let prefix = match net {
                     IpNet::V4(v4) => IpNet::V4(v4.trunc()),
                     IpNet::V6(v6) => IpNet::V6(v6.trunc()),
@@ -81,6 +87,7 @@ pub fn parse_cidrs(input: impl BufRead) -> Result<Vec<ParsedCidr>, OptimizerErro
                 results.push(ParsedCidr { prefix, raw_text, comment, line_number: line_num });
             }
             Err(_) => {
+                // Truncate displayed input to prevent log flooding from adversarial content
                 return Err(OptimizerError::Parse {
                     line: line_num,
                     message: format!("invalid IP or CIDR: '{}'", &cidr_part[..cidr_part.len().min(100)]),
@@ -115,14 +122,16 @@ pub fn parse_preferred(input: impl BufRead, source: &str) -> Result<Vec<Preferre
 /// Parse input lines into partitioned IPv4/IPv6 prefix vectors with indices.
 ///
 /// Wraps `parse_cidrs` with max-entries enforcement, metadata storage, and
-/// non-canonical warnings — preserving all existing behavior.
+/// non-canonical warnings.
 pub fn parse_input(
     input: impl BufRead,
     store_metadata: bool,
     max_entries: usize,
 ) -> Result<ParsedInput, OptimizerError> {
+    // Phase overview: parse → enforce size cap → partition by AF with canonicality checks
     let cidrs = parse_cidrs(input)?;
 
+    // Enforce input size cap to bound memory and runtime
     if cidrs.len() > max_entries {
         return Err(OptimizeError::InputTooLarge {
             count: cidrs.len(),
@@ -135,7 +144,9 @@ pub fn parse_input(
     let mut input_metadata = Vec::new();
     let mut warnings = Vec::new();
 
+    // Partition entries by address family, storing metadata and detecting non-canonical inputs
     for (entry_index, cidr) in cidrs.iter().enumerate() {
+        // Source-map output needs original text to trace optimized CIDRs back to input lines
         if store_metadata {
             input_metadata.push(InputEntry {
                 original: cidr.raw_text.clone(),
@@ -145,8 +156,10 @@ pub fn parse_input(
 
         match cidr.prefix {
             IpNet::V4(v4) => {
+                // Only check canonicality for explicit CIDR notation
                 if cidr.raw_text.contains('/') {
                     if let Ok(original) = cidr.raw_text.parse::<Ipv4Net>() {
+                        // Cap warnings to prevent unbounded growth
                         if original != v4 && warnings.len() < 1000 {
                             warnings.push((
                                 cidr.line_number,
@@ -158,8 +171,10 @@ pub fn parse_input(
                 ipv4.push((entry_index, v4));
             }
             IpNet::V6(v6) => {
+                // Only check canonicality for explicit CIDR notation
                 if cidr.raw_text.contains('/') {
                     if let Ok(original) = cidr.raw_text.parse::<Ipv6Net>() {
+                        // Cap warnings to prevent unbounded growth
                         if original != v6 && warnings.len() < 1000 {
                             warnings.push((
                                 cidr.line_number,

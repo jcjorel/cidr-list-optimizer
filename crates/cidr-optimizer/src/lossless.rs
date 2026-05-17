@@ -1,10 +1,14 @@
+//! Lossless CIDR aggregation — merges adjacent/overlapping prefixes into the minimal equivalent set with zero over-exposition.
+
 use ipnet::{Ipv4Net, Ipv6Net};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// A prefix with source-map tracking and coverage information.
 #[derive(Debug, Clone)]
 pub struct SourceMapPrefix<N> {
+    /// The aggregated network prefix.
     pub prefix: N,
+    /// Indices into the original input that this prefix covers.
     pub source_indices: Vec<usize>,
     /// Number of IPs actually covered by original inputs within this prefix.
     /// For lossless entries, equals the prefix capacity (zero over-coverage).
@@ -23,7 +27,7 @@ pub fn lossless_aggregate_v4(
         return Vec::new();
     }
 
-    // Build source-map entries
+    // Convert indexed inputs into source-map entries with computed prefix capacity
     let mut entries: Vec<SourceMapPrefix<Ipv4Net>> = input
         .into_iter()
         .map(|(idx, prefix)| {
@@ -38,9 +42,10 @@ pub fn lossless_aggregate_v4(
         })
         .collect();
 
-    // Enforce max_prefix_len: truncate longer prefixes
+    // Clamp prefixes longer than the allowed maximum to max_prefix_len
     if max_prefix_len < 32 {
         for entry in &mut entries {
+            // Only truncate entries that exceed the limit
             if entry.prefix.prefix_len() > max_prefix_len {
                 entry.prefix = Ipv4Net::new(
                     trunc_v4(entry.prefix.network(), max_prefix_len),
@@ -75,10 +80,12 @@ pub fn lossless_aggregate_v6(
         return Vec::new();
     }
 
+    // Convert indexed inputs into source-map entries with computed prefix capacity
     let mut entries: Vec<SourceMapPrefix<Ipv6Net>> = input
         .into_iter()
         .map(|(idx, prefix)| {
             let pl = prefix.prefix_len();
+            // Guard against shift overflow: /0 covers the entire 128-bit space
             let cap = if pl == 128 { 1u128 } else if (128 - pl) >= 128 { u128::MAX } else { 1u128 << (128 - pl) };
             SourceMapPrefix {
                 prefix,
@@ -89,8 +96,10 @@ pub fn lossless_aggregate_v6(
         })
         .collect();
 
+    // Clamp prefixes longer than the allowed maximum to max_prefix_len
     if max_prefix_len < 128 {
         for entry in &mut entries {
+            // Only truncate entries that exceed the limit
             if entry.prefix.prefix_len() > max_prefix_len {
                 entry.prefix = Ipv6Net::new(
                     trunc_v6(entry.prefix.network(), max_prefix_len),
@@ -115,12 +124,16 @@ pub fn lossless_aggregate_v6(
 
 fn trunc_v4(addr: Ipv4Addr, prefix_len: u8) -> Ipv4Addr {
     let bits = u32::from(addr);
+    // A /0 mask is all-zeros (covers entire address space)
     let mask = if prefix_len == 0 { 0 } else { !0u32 << (32 - prefix_len) };
     Ipv4Addr::from(bits & mask)
 }
 
 /// Radix sort by (network_address bytes [0..3], prefix_len) — 5 passes LSD.
 fn radix_sort_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
+    // Algorithm: 5-pass LSD radix sort. Keys are 5 bytes [prefix_len, addr[3..0]].
+    // Sorting LSD-first ensures stability across passes, producing final order
+    // (network_address ASC, prefix_length ASC) needed by redundancy elimination.
     let len = entries.len();
     if len <= 1 {
         return;
@@ -133,8 +146,7 @@ fn radix_sort_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
         preferred_overlap_in_coverage: 0,
     });
 
-    // Key extraction: 5 bytes = [prefix_len, addr[3], addr[2], addr[1], addr[0]]
-    // LSD: sort by least significant byte first
+    // Extract 5-byte sort key: [prefix_len, addr_byte3..0] in LSD order
     let key_bytes: Vec<[u8; 5]> = entries
         .iter()
         .map(|e| {
@@ -146,15 +158,19 @@ fn radix_sort_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
     let mut indices: Vec<usize> = (0..len).collect();
     let mut indices_buf: Vec<usize> = vec![0; len];
 
+    // 5-pass LSD radix sort over the 5 key bytes
     for pass in 0..5 {
+        // Count occurrences of each byte value
         let mut counts = [0u32; 256];
         for &i in &indices {
             counts[key_bytes[i][pass] as usize] += 1;
         }
+        // Convert counts to starting offsets (exclusive prefix sum)
         let mut offsets = [0u32; 256];
         for i in 1..256 {
             offsets[i] = offsets[i - 1] + counts[i - 1];
         }
+        // Scatter elements to their sorted positions
         for &i in &indices {
             let byte = key_bytes[i][pass] as usize;
             indices_buf[offsets[byte] as usize] = i;
@@ -163,7 +179,7 @@ fn radix_sort_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
         std::mem::swap(&mut indices, &mut indices_buf);
     }
 
-    // Apply permutation
+    // Apply the computed permutation to produce the sorted output
     let mut sorted = Vec::with_capacity(len);
     for &i in &indices {
         sorted.push(std::mem::replace(
@@ -187,8 +203,9 @@ fn redundancy_eliminate_v4(
     let mut stack: Vec<SourceMapPrefix<Ipv4Net>> = Vec::new();
     let mut output: Vec<SourceMapPrefix<Ipv4Net>> = Vec::new();
 
+    // Process each entry against the containment stack
     for entry in entries {
-        // Pop entries that don't contain the current entry
+        // Pop stack entries that cannot contain the current prefix
         while let Some(top) = stack.last() {
             if contains_v4(&top.prefix, &entry.prefix) {
                 break;
@@ -196,6 +213,7 @@ fn redundancy_eliminate_v4(
             output.push(stack.pop().unwrap());
         }
 
+        // If top of stack contains current entry, absorb it (redundant)
         if let Some(top) = stack.last_mut() {
             if contains_v4(&top.prefix, &entry.prefix) {
                 // Current entry is redundant — merge source-map into container
@@ -208,7 +226,7 @@ fn redundancy_eliminate_v4(
         stack.push(entry);
     }
 
-    // Drain remaining stack
+    // Flush remaining stack entries to output
     while let Some(entry) = stack.pop() {
         output.push(entry);
     }
@@ -217,11 +235,13 @@ fn redundancy_eliminate_v4(
 }
 
 fn contains_v4(outer: &Ipv4Net, inner: &Ipv4Net) -> bool {
+    // A longer prefix cannot contain a shorter one
     if outer.prefix_len() > inner.prefix_len() {
         return false;
     }
     let outer_bits = u32::from(outer.network());
     let inner_bits = u32::from(inner.network());
+    // /0 contains everything
     let mask = if outer.prefix_len() == 0 {
         0
     } else {
@@ -232,11 +252,15 @@ fn contains_v4(outer: &Ipv4Net, inner: &Ipv4Net) -> bool {
 
 /// Stack-based sibling merging with cascading.
 fn sibling_merge_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
+    // Algorithm: Process prefixes from longest to shortest. Push each onto a stack,
+    // then cascade-merge while the top two are siblings (same length, differ only in
+    // the distinguishing bit). This naturally handles multi-level cascading merges.
+
     if entries.len() <= 1 {
         return;
     }
 
-    // Sort by (prefix_length DESC, network_address ASC)
+    // Sort by prefix_length DESC then network ASC so siblings are adjacent on the stack
     entries.sort_unstable_by(|a, b| {
         b.prefix
             .prefix_len()
@@ -248,12 +272,14 @@ fn sibling_merge_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
 
     let mut stack: Vec<SourceMapPrefix<Ipv4Net>> = Vec::new();
 
+    // Process entries from longest prefix to shortest, attempting merges
     for entry in entries.drain(..) {
         stack.push(entry);
 
-        // Check for sibling merges (cascading)
+        // Cascade: keep merging while the top two stack entries are siblings
         while stack.len() >= 2 {
             let len = stack.len();
+            // Check if the two most recent entries form a sibling pair
             if are_siblings_v4(&stack[len - 2].prefix, &stack[len - 1].prefix) {
                 let right = stack.pop().unwrap();
                 let left = stack.pop().unwrap();
@@ -278,6 +304,7 @@ fn sibling_merge_v4(entries: &mut Vec<SourceMapPrefix<Ipv4Net>>) {
 }
 
 fn are_siblings_v4(a: &Ipv4Net, b: &Ipv4Net) -> bool {
+    // Siblings must share the same prefix length and cannot be /0
     if a.prefix_len() != b.prefix_len() || a.prefix_len() == 0 {
         return false;
     }
@@ -293,6 +320,7 @@ fn are_siblings_v4(a: &Ipv4Net, b: &Ipv4Net) -> bool {
 
 fn trunc_v6(addr: Ipv6Addr, prefix_len: u8) -> Ipv6Addr {
     let bits = u128::from(addr);
+    // A /0 mask is all-zeros (covers entire address space)
     let mask = if prefix_len == 0 {
         0
     } else {
@@ -302,12 +330,15 @@ fn trunc_v6(addr: Ipv6Addr, prefix_len: u8) -> Ipv6Addr {
 }
 
 fn radix_sort_v6(entries: &mut Vec<SourceMapPrefix<Ipv6Net>>) {
+    // Algorithm: 17-pass LSD radix sort. Keys are 17 bytes [prefix_len, addr[15..0]].
+    // Sorting LSD-first ensures stability across passes, producing final order
+    // (network_address ASC, prefix_length ASC) needed by redundancy elimination.
     let len = entries.len();
     if len <= 1 {
         return;
     }
 
-    // Key: 17 bytes = [prefix_len, addr[15], addr[14], ..., addr[0]]
+    // Extract 17-byte sort key: [prefix_len, addr_byte15..0] in LSD order
     let key_bytes: Vec<[u8; 17]> = entries
         .iter()
         .map(|e| {
@@ -324,15 +355,19 @@ fn radix_sort_v6(entries: &mut Vec<SourceMapPrefix<Ipv6Net>>) {
     let mut indices: Vec<usize> = (0..len).collect();
     let mut indices_buf: Vec<usize> = vec![0; len];
 
+    // 17-pass LSD radix sort over the 17 key bytes
     for pass in 0..17 {
+        // Count occurrences of each byte value
         let mut counts = [0u32; 256];
         for &i in &indices {
             counts[key_bytes[i][pass] as usize] += 1;
         }
+        // Convert counts to starting offsets (exclusive prefix sum)
         let mut offsets = [0u32; 256];
         for i in 1..256 {
             offsets[i] = offsets[i - 1] + counts[i - 1];
         }
+        // Scatter elements to their sorted positions
         for &i in &indices {
             let byte = key_bytes[i][pass] as usize;
             indices_buf[offsets[byte] as usize] = i;
@@ -341,6 +376,7 @@ fn radix_sort_v6(entries: &mut Vec<SourceMapPrefix<Ipv6Net>>) {
         std::mem::swap(&mut indices, &mut indices_buf);
     }
 
+    // Apply the computed permutation to produce the sorted output
     let mut sorted = Vec::with_capacity(len);
     for &i in &indices {
         sorted.push(std::mem::replace(
@@ -362,7 +398,9 @@ fn redundancy_eliminate_v6(
     let mut stack: Vec<SourceMapPrefix<Ipv6Net>> = Vec::new();
     let mut output: Vec<SourceMapPrefix<Ipv6Net>> = Vec::new();
 
+    // Process each entry against the containment stack
     for entry in entries {
+        // Pop stack entries that cannot contain the current prefix
         while let Some(top) = stack.last() {
             if contains_v6(&top.prefix, &entry.prefix) {
                 break;
@@ -370,6 +408,7 @@ fn redundancy_eliminate_v6(
             output.push(stack.pop().unwrap());
         }
 
+        // If top of stack contains current entry, absorb it (redundant)
         if let Some(top) = stack.last_mut() {
             if contains_v6(&top.prefix, &entry.prefix) {
                 top.source_indices.extend(&entry.source_indices);
@@ -381,6 +420,7 @@ fn redundancy_eliminate_v6(
         stack.push(entry);
     }
 
+    // Flush remaining stack entries to output
     while let Some(entry) = stack.pop() {
         output.push(entry);
     }
@@ -389,11 +429,13 @@ fn redundancy_eliminate_v6(
 }
 
 fn contains_v6(outer: &Ipv6Net, inner: &Ipv6Net) -> bool {
+    // A longer prefix cannot contain a shorter one
     if outer.prefix_len() > inner.prefix_len() {
         return false;
     }
     let outer_bits = u128::from(outer.network());
     let inner_bits = u128::from(inner.network());
+    // /0 contains everything
     let mask = if outer.prefix_len() == 0 {
         0
     } else {
@@ -403,10 +445,15 @@ fn contains_v6(outer: &Ipv6Net, inner: &Ipv6Net) -> bool {
 }
 
 fn sibling_merge_v6(entries: &mut Vec<SourceMapPrefix<Ipv6Net>>) {
+    // Algorithm: Process prefixes from longest to shortest. Push each onto a stack,
+    // then cascade-merge while the top two are siblings (same length, differ only in
+    // the distinguishing bit). This naturally handles multi-level cascading merges.
+
     if entries.len() <= 1 {
         return;
     }
 
+    // Sort by prefix_length DESC then network ASC so siblings are adjacent on the stack
     entries.sort_unstable_by(|a, b| {
         b.prefix
             .prefix_len()
@@ -418,11 +465,14 @@ fn sibling_merge_v6(entries: &mut Vec<SourceMapPrefix<Ipv6Net>>) {
 
     let mut stack: Vec<SourceMapPrefix<Ipv6Net>> = Vec::new();
 
+    // Process entries from longest prefix to shortest, attempting merges
     for entry in entries.drain(..) {
         stack.push(entry);
 
+        // Cascade: keep merging while the top two stack entries are siblings
         while stack.len() >= 2 {
             let len = stack.len();
+            // Check if the two most recent entries form a sibling pair
             if are_siblings_v6(&stack[len - 2].prefix, &stack[len - 1].prefix) {
                 let right = stack.pop().unwrap();
                 let left = stack.pop().unwrap();
@@ -447,6 +497,7 @@ fn sibling_merge_v6(entries: &mut Vec<SourceMapPrefix<Ipv6Net>>) {
 }
 
 fn are_siblings_v6(a: &Ipv6Net, b: &Ipv6Net) -> bool {
+    // Siblings must share the same prefix length and cannot be /0
     if a.prefix_len() != b.prefix_len() || a.prefix_len() == 0 {
         return false;
     }

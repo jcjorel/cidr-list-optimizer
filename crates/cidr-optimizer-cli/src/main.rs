@@ -1,3 +1,5 @@
+//! CLI entry point for cidr-optimizer — parses arguments, runs optimization, and emits output in multiple formats.
+
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -128,6 +130,7 @@ struct JsonStats {
     input_ipv6_covered_ips: u128,
 }
 
+// serde skip-predicate: suppress zero-valued fields in JSON output
 fn is_zero_u128(v: &u128) -> bool {
     *v == 0
 }
@@ -191,6 +194,7 @@ fn parse_exclusion_files(paths: &[PathBuf]) -> Result<(Vec<ExclusionEntry>, Vec<
     let mut entries = Vec::new();
     let mut source_info = Vec::new();
 
+    // Load and parse each exclusion file, accumulating entries and per-file metadata
     for path in paths {
         let file = File::open(path)
             .map_err(|e| anyhow::anyhow!("cannot open exclusion file '{}': {}", path.display(), e))?;
@@ -214,6 +218,7 @@ fn parse_exclusion_files(paths: &[PathBuf]) -> Result<(Vec<ExclusionEntry>, Vec<
 /// Parse preferred CIDR files.
 fn parse_preferred_files(paths: &[PathBuf]) -> Result<Vec<PreferredEntry>> {
     let mut entries = Vec::new();
+    // Load and parse each preferred-CIDR file into a flat entry list
     for path in paths {
         let file = File::open(path)
             .map_err(|e| anyhow::anyhow!("cannot open preferred file '{}': {}", path.display(), e))?;
@@ -261,6 +266,8 @@ fn build_json_stats(stats: &cidr_optimizer::OptimizationStats) -> JsonStats {
 }
 
 fn main() -> Result<()> {
+    // Phases: parse args → validate conflicts → load exclusions/preferred → build config
+    //       → run optimizer → check constraints → emit output → write source-map
     let cli = Cli::parse();
 
     let ipv4_target = cli.ipv4_target.as_deref().map(parse_target_spec).transpose()?;
@@ -313,11 +320,13 @@ fn main() -> Result<()> {
     };
 
     // Run optimization
+    // Select input source: stdin when "-", otherwise open the named file
     let reader: Box<dyn BufRead> = if cli.input == "-" {
         Box::new(BufReader::new(io::stdin()))
     } else {
         Box::new(BufReader::new(File::open(&cli.input)?))
     };
+    // Run the core optimization and handle fatal invariant violations
     let (result, input_metadata) = match optimize_from_reader(reader, &config) {
         Ok(reader_result) => (reader_result.result, reader_result.input_metadata),
         Err(OptimizerError::Optimize(OptimizeError::CoverageLost)) => {
@@ -327,7 +336,7 @@ fn main() -> Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    // Exit code 2: exclusion-constrained (more specific than ratio-cap)
+    // Exit code 2: exclusion zones made the target unreachable
     if result.stats.ipv4_exclusion_constrained || result.stats.ipv6_exclusion_constrained {
         if result.stats.ipv4_exclusion_constrained {
             eprintln!(
@@ -344,7 +353,7 @@ fn main() -> Result<()> {
         process::exit(2);
     }
 
-    // Fail hard if EntryCount target was not met (not for MaxOverCoverage)
+    // Fail if entry-count target was not met (ratio-cap prevented further merging)
     if let Some(TargetSpec::EntryCount(t)) = ipv4_target {
         if result.stats.output_ipv4_count > t {
             eprintln!(
@@ -366,7 +375,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // Warn on stderr if input overlaps exclusion zones
+    // Emit per-entry warnings when output prefixes collide with exclusion zones
     if cli.warn_on_excluded_input {
         for entry in &result.entries {
             if let Some(ref collisions) = entry.exclusion_collisions {
@@ -380,7 +389,9 @@ fn main() -> Result<()> {
         }
     }
 
-    // Warn on stderr if over-coverage exceeds 1000%
+    // Heuristic warning for uncapped optimization: compares over-coverage IP count against
+    // input entry count (not IP count). This is a rough proxy — the 1000% message is
+    // intentionally imprecise to flag potentially extreme widening for human review.
     if effective_ratio.is_none() {
         let input_v4_ips = result.stats.input_ipv4_count as u128;
         let input_v6_ips = result.stats.input_ipv6_count as u128;
@@ -405,6 +416,7 @@ fn main() -> Result<()> {
             result.stats.ipv6_compression_ratio,
         );
         if result.stats.total_ipv4_over_coverage > 0 {
+            // Print IPv4 over-coverage with percentage when base IP count is available
             if result.stats.input_ipv4_covered_ips > 0 {
                 let pct = result.stats.total_ipv4_over_coverage as f64
                     / result.stats.input_ipv4_covered_ips as f64 * 100.0;
@@ -427,6 +439,7 @@ fn main() -> Result<()> {
             }
         }
         if result.stats.total_ipv6_over_coverage > 0 {
+            // Print IPv6 over-coverage with percentage when base IP count is available
             if result.stats.input_ipv6_covered_ips > 0 {
                 let pct = result.stats.total_ipv6_over_coverage as f64
                     / result.stats.input_ipv6_covered_ips as f64 * 100.0;
@@ -450,13 +463,17 @@ fn main() -> Result<()> {
         }
     }
 
+    // Emit results in the requested format
     match cli.format {
+        // One CIDR per line
         OutputFormat::Plain => {
             for entry in &result.entries {
                 println!("{}", entry.prefix);
             }
         }
+        // Structured JSON with stats
         OutputFormat::Json => {
+            // Partition entries by address family and convert to JSON representation
             let json_output = JsonOutput {
                 ipv4: result.entries.iter()
                     .filter(|e| matches!(e.prefix, ipnet::IpNet::V4(_)))
@@ -471,7 +488,9 @@ fn main() -> Result<()> {
             };
             println!("{}", serde_json::to_string_pretty(&json_output)?);
         }
+        // AWS-native format for IP sets
         OutputFormat::Aws => {
+            // Convert all entries to AWS Cidr format
             let aws_entries: Vec<AwsEntry> = result.entries.iter()
                 .map(|e| AwsEntry { cidr: e.prefix.to_string() })
                 .collect();
@@ -481,6 +500,7 @@ fn main() -> Result<()> {
 
     // Write source-map file if requested
     if let Some(ref path) = cli.source_map {
+        // Build source-map entries linking each output prefix to its original inputs, exclusion collisions, and preferred contributions
         let sm_entries: Vec<SourceMapEntry> = result.entries.iter().map(|e| {
             let sources = e.source_indices.as_ref().map_or_else(Vec::new, |indices| {
                 indices.iter().map(|&i| {

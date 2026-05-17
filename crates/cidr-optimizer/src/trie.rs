@@ -1,3 +1,9 @@
+//! Path-compressed binary trie for CIDR budget optimization.
+//!
+//! Provides an arena-allocated binary trie that stores IPv4/IPv6 prefixes with
+//! path compression. Used by the budget optimizer to find the least-cost
+//! collapse operations that reduce entry count while minimizing over-coverage.
+
 use ipnet::{Ipv4Net, Ipv6Net};
 
 use crate::error::OptimizeError;
@@ -5,28 +11,51 @@ use crate::exclusion::ExclusionSet;
 use crate::lossless::SourceMapPrefix;
 use crate::preferred::PreferredSet;
 
+/// Index into the trie arena; u32 for compact storage.
 pub type NodeIdx = u32;
+/// Sentinel value indicating no node (null pointer equivalent).
 pub const INVALID: NodeIdx = u32::MAX;
 
+/// A single node in the path-compressed binary trie.
+///
+/// Each node represents a prefix position and may store a compressed path
+/// segment (`skip_bits`/`skip_len`) to avoid allocating intermediate nodes
+/// for long shared prefixes.
 #[repr(C)]
 #[derive(Clone)]
 pub struct TrieNode {
+    /// Compressed path bits for this node's skip segment (stored in the lowest skip_len bits,
+    /// MSB of the path in the highest position among those bits).
     pub skip_bits: u128,
+    /// Total IP address coverage of original input leaves under this node (not updated on collapse).
     pub coverage: u128,
+    /// Accumulated collapse cost of all descendants already collapsed.
     pub collapsed_cost_sum: u128,
+    /// Number of preferred-set IPs overlapping this subtree's coverage.
     pub preferred_overlap: u128,
+    /// Preferred overlap restricted to actually-covered addresses.
     pub preferred_overlap_in_coverage: u128,
+    /// Child node indices: [0] for bit=0, [1] for bit=1.
     pub children: [NodeIdx; 2],
+    /// Parent node index (INVALID for root).
     pub parent: NodeIdx,
+    /// Number of leaf nodes in this subtree.
     pub leaf_count: u32,
+    /// Generation counter for invalidation tracking.
     pub generation: u32,
+    /// Bit depth of this node within the trie (excludes skip_len).
     pub depth: u8,
+    /// Whether this node represents an actual prefix (leaf) vs internal branch.
     pub is_leaf: bool,
+    /// Length of the compressed path segment stored in skip_bits.
     pub skip_len: u8,
+    /// Whether collapsing this node would expose excluded IP ranges.
     pub is_excluded: bool,
+    // Explicit padding to reach 112-byte cache-aligned size
     _pad: [u8; 4],
 }
 
+// Compile-time size assertion for cache-line alignment
 const _: () = assert!(std::mem::size_of::<TrieNode>() == 112);
 
 impl Default for TrieNode {
@@ -50,15 +79,24 @@ impl Default for TrieNode {
     }
 }
 
+/// Arena-allocated path-compressed binary trie for IPv4/IPv6 prefixes.
+///
+/// Stores all nodes in a flat `Vec` for cache-friendly traversal. Supports
+/// insertion, collapse, exclusion marking, and leaf extraction for both
+/// address families using a uniform u128 key representation.
 pub struct BinaryTrie {
+    /// Flat arena holding all trie nodes; indexed by `NodeIdx`.
     pub arena: Vec<TrieNode>,
+    /// Index of the root node in the arena.
     pub root: NodeIdx,
+    /// Address family bit width (32 for IPv4, 128 for IPv6).
     pub addr_bits: u8,
 }
 
 impl BinaryTrie {
     fn alloc_node(&mut self) -> Result<NodeIdx, OptimizeError> {
         let idx: NodeIdx = self.arena.len().try_into().map_err(|_| OptimizeError::ArenaOverflow)?;
+        // Returning INVALID as a live index would corrupt parent/child pointers
         if idx == INVALID {
             return Err(OptimizeError::ArenaOverflow);
         }
@@ -66,8 +104,14 @@ impl BinaryTrie {
         Ok(idx)
     }
 
+    /// Returns the total number of IP addresses in this node's prefix range.
+    ///
+    /// For the root node (depth=0, skip_len=0) this returns u128::MAX as a sentinel
+    /// because the full address space (2^addr_bits) overflows u128. For a /32 IPv4
+    /// or /128 IPv6 prefix it is exactly 1.
     pub fn capacity(&self, node_idx: NodeIdx) -> u128 {
         let node = &self.arena[node_idx as usize];
+        // Entire address space — cannot be expressed as 2^N without overflow
         if node.depth == 0 && node.skip_len == 0 {
             return u128::MAX;
         }
@@ -77,16 +121,25 @@ impl BinaryTrie {
             return 1;
         }
         let shift = self.addr_bits as u16 - prefix_len;
+        // Defensive: shift >= 128 would overflow u128; shouldn't occur in valid tries
         if shift >= 128 {
             return u128::MAX;
         }
         1u128 << shift
     }
 
+    /// Returns the over-coverage cost of collapsing this node into a single leaf.
+    ///
+    /// This is the number of extra IP addresses that would be allowed beyond
+    /// what the original leaves already cover.
     pub fn collapse_cost(&self, node_idx: NodeIdx) -> u128 {
         self.capacity(node_idx).saturating_sub(self.arena[node_idx as usize].coverage)
     }
 
+    /// Collapses this node into a leaf, discarding all children.
+    ///
+    /// After collapse, the node represents its entire prefix range as a single
+    /// entry. Callers must update ancestor leaf counts separately.
     pub fn collapse(&mut self, node_idx: NodeIdx) {
         let node = &mut self.arena[node_idx as usize];
         node.is_leaf = true;
@@ -94,6 +147,10 @@ impl BinaryTrie {
         node.children = [INVALID, INVALID];
     }
 
+    /// Invalidates all descendants by incrementing their generation counter.
+    ///
+    /// Used to mark heap entries as stale after a collapse operation without
+    /// removing them from the priority queue.
     pub fn invalidate_subtree(&mut self, node_idx: NodeIdx) {
         let mut stack = vec![node_idx];
         while let Some(idx) = stack.pop() {
@@ -108,8 +165,12 @@ impl BinaryTrie {
         }
     }
 
+    /// Recomputes `leaf_count` for a node from its immediate children.
+    ///
+    /// Must be called bottom-up after structural changes (collapse, split).
     pub fn update_leaf_count(&mut self, node_idx: NodeIdx) {
         let node = &self.arena[node_idx as usize];
+        // Leaf count is set at insertion/collapse time, not recomputed here
         if node.is_leaf {
             return;
         }
@@ -123,10 +184,12 @@ impl BinaryTrie {
         self.arena[node_idx as usize].leaf_count = count;
     }
 
+    /// Returns the total number of leaf prefixes in the trie.
     pub fn total_leaf_count(&self) -> usize {
         self.arena[self.root as usize].leaf_count as usize
     }
 
+    /// Collects all leaf node indices via DFS traversal.
     pub fn extract_leaf_indices(&self) -> Vec<NodeIdx> {
         let mut leaves = Vec::new();
         self.collect_leaves(self.root, &mut leaves);
@@ -148,13 +211,14 @@ impl BinaryTrie {
 
     /// Extract the prefix (network bits + prefix_len) for a node.
     fn node_prefix_bits(&self, node_idx: NodeIdx) -> (u128, u8) {
-        // Walk from root to node, collecting bits
+        // Walk from node up to root, then reverse to get root-to-node order
         let mut path = Vec::new();
         let mut cur = node_idx;
         while cur != self.root {
             path.push(cur);
             cur = self.arena[cur as usize].parent;
         }
+        // Replay path top-down to reconstruct prefix bits in MSB-first order
         path.reverse();
 
         let mut bits: u128 = 0;
@@ -163,7 +227,6 @@ impl BinaryTrie {
         for &idx in &path {
             let node = &self.arena[idx as usize];
             let parent = node.parent;
-            // Determine which branch bit was taken at parent
             if parent != INVALID {
                 let p = &self.arena[parent as usize];
                 let branch_bit = if p.children[1] == idx { 1u128 } else { 0u128 };
@@ -172,7 +235,6 @@ impl BinaryTrie {
                 }
                 pos += 1;
             }
-            // Add skip_bits
             let skip_len = node.skip_len as u16;
             for i in 0..skip_len {
                 let bit = (node.skip_bits >> (skip_len - 1 - i)) & 1;
@@ -187,6 +249,7 @@ impl BinaryTrie {
         (bits, prefix_len)
     }
 
+    /// Extracts all leaf prefixes as IPv4 networks with their coverage metadata.
     pub fn extract_leaves_v4(&self) -> Vec<SourceMapPrefix<Ipv4Net>> {
         let leaf_indices = self.extract_leaf_indices();
         leaf_indices
@@ -205,6 +268,7 @@ impl BinaryTrie {
             .collect()
     }
 
+    /// Extracts all leaf prefixes as IPv6 networks with their coverage metadata.
     pub fn extract_leaves_v6(&self) -> Vec<SourceMapPrefix<Ipv6Net>> {
         let leaf_indices = self.extract_leaf_indices();
         leaf_indices
@@ -222,6 +286,9 @@ impl BinaryTrie {
             .collect()
     }
 
+    /// Builds a trie from pre-aggregated IPv4 prefixes.
+    ///
+    /// Inserts each prefix and computes bottom-up metadata (coverage, leaf counts).
     pub fn build_from_v4(lossless: &[SourceMapPrefix<Ipv4Net>]) -> Result<Self, OptimizeError> {
         let mut trie = Self {
             arena: Vec::new(),
@@ -231,9 +298,11 @@ impl BinaryTrie {
         let root = trie.alloc_node()?;
         trie.root = root;
 
+        // Insert each lossless prefix into the trie
         for entry in lossless {
             let addr = u32::from(entry.prefix.network()) as u128;
-            let key = addr << 96; // shift to top 32 bits of u128
+            // Pack 32-bit IPv4 address into top bits of u128 for uniform trie key format
+            let key = addr << 96;
             let prefix_len = entry.prefix.prefix_len();
             let coverage = if prefix_len == 32 { 1u128 } else { 1u128 << (32 - prefix_len) };
             trie.insert(key, prefix_len, coverage)?;
@@ -243,6 +312,9 @@ impl BinaryTrie {
         Ok(trie)
     }
 
+    /// Builds a trie from pre-aggregated IPv6 prefixes.
+    ///
+    /// Inserts each prefix and computes bottom-up metadata (coverage, leaf counts).
     pub fn build_from_v6(lossless: &[SourceMapPrefix<Ipv6Net>]) -> Result<Self, OptimizeError> {
         let mut trie = Self {
             arena: Vec::new(),
@@ -264,6 +336,11 @@ impl BinaryTrie {
     }
 
     /// Insert a prefix into the trie. Key is stored in the top `addr_bits` bits of u128.
+    ///
+    /// Algorithm: walks the trie from root following the key bits. At each node,
+    /// compares the key against the node's compressed path (skip_bits). On mismatch,
+    /// splits the node at the divergence point. On full match, descends to the
+    /// appropriate child or creates a new leaf if the slot is empty.
     fn insert(&mut self, key: u128, prefix_len: u8, coverage: u128) -> Result<(), OptimizeError> {
         let mut cur = self.root;
         let mut bit_pos: u16 = 0;
@@ -272,15 +349,15 @@ impl BinaryTrie {
             let node = &self.arena[cur as usize];
             let node_skip_len = node.skip_len as u16;
 
-            // Check if we need to traverse/split this node's compressed path
+            // Compare key bits against this node's compressed path segment
             if node_skip_len > 0 {
                 let mut mismatch_offset: u16 = 0;
                 let mut matched_all = true;
 
                 while mismatch_offset < node_skip_len {
                     let target_bit_pos = bit_pos + mismatch_offset;
+                    // Key is shorter than this node's path — need to split
                     if target_bit_pos >= prefix_len as u16 {
-                        // Key is shorter than this node's path — need to split
                         matched_all = false;
                         break;
                     }
@@ -294,7 +371,6 @@ impl BinaryTrie {
                 }
 
                 if !matched_all {
-                    // Split at mismatch_offset
                     self.split_node(cur, mismatch_offset as u8)?;
                     bit_pos += mismatch_offset;
                 } else {
@@ -302,21 +378,18 @@ impl BinaryTrie {
                 }
             }
 
-            // Check if we've reached the target prefix length
             if bit_pos == prefix_len as u16 {
-                // This node IS the target — mark as leaf with coverage
                 self.arena[cur as usize].is_leaf = true;
                 self.arena[cur as usize].coverage = self.arena[cur as usize].coverage.saturating_add(coverage);
                 return Ok(());
             }
 
-            // Branch on next bit
             let branch_bit = ((key >> (127 - bit_pos)) & 1) as usize;
             bit_pos += 1;
 
             let child = self.arena[cur as usize].children[branch_bit];
+            // Store remaining key bits as the new leaf's compressed path
             if child == INVALID {
-                // Create new leaf with remaining bits as skip
                 let new_node = self.alloc_node()?;
                 let remaining = prefix_len as u16 - bit_pos;
                 let skip_bits = if remaining > 0 && remaining < 128 {
@@ -340,6 +413,11 @@ impl BinaryTrie {
     }
 
     /// Split a compressed node at the given offset within its skip segment.
+    ///
+    /// Algorithm: creates a "remainder" node that inherits the original's children
+    /// and state from the split point onward. The original node is truncated to
+    /// hold only the prefix before the split, with the remainder as its child
+    /// on the appropriate branch.
     fn split_node(&mut self, node_idx: NodeIdx, offset: u8) -> Result<(), OptimizeError> {
         let node = &self.arena[node_idx as usize];
         let old_skip_len = node.skip_len;
@@ -348,10 +426,12 @@ impl BinaryTrie {
 
         debug_assert!(offset < old_skip_len);
 
-        // Create a new child that holds the remainder of the compressed path
+        // Allocate remainder node to hold the suffix of the compressed path
         let remainder_node = self.alloc_node()?;
 
-        let remainder_skip_len = old_skip_len - offset - 1; // -1 for the branch bit
+        // -1 because the bit at the split point becomes the branch direction, not part of either skip segment
+        let remainder_skip_len = old_skip_len - offset - 1;
+        // The bit at the split offset determines which child slot gets the remainder
         let branch_bit_in_skip = ((old_skip_bits >> (old_skip_len as u16 - 1 - offset as u16)) & 1) as usize;
 
         let remainder_bits = if remainder_skip_len > 0 {
@@ -360,7 +440,7 @@ impl BinaryTrie {
             0
         };
 
-        // Copy the original node's state to the remainder
+        // Transfer the original node's state to the remainder
         let orig = &self.arena[node_idx as usize];
         let orig_children = orig.children;
         let orig_is_leaf = orig.is_leaf;
@@ -379,14 +459,12 @@ impl BinaryTrie {
         self.arena[remainder_node as usize].leaf_count = orig_leaf_count;
         self.arena[remainder_node as usize].collapsed_cost_sum = orig_collapsed_cost_sum;
 
-        // Update children's parent pointers
         for &child in &orig_children {
             if child != INVALID {
                 self.arena[child as usize].parent = remainder_node;
             }
         }
 
-        // Truncate the original node to just the prefix before the mismatch
         let new_skip_len = offset;
         let new_skip_bits = if new_skip_len > 0 {
             old_skip_bits >> (old_skip_len as u16 - offset as u16)
@@ -433,16 +511,23 @@ impl BinaryTrie {
 
     /// Mark internal nodes whose collapse would cover excluded IPs not already
     /// covered by input leaves. Ancestors of excluded nodes are also excluded.
+    ///
+    /// Two-pass approach: first scans all internal nodes and marks those whose
+    /// prefix range intersects an exclusion zone (and has uncovered gaps). Then
+    /// propagates the exclusion flag upward to all ancestors so the optimizer
+    /// never collapses a node that would absorb an excluded range.
     pub fn mark_exclusions(&mut self, exclusion_set: &ExclusionSet, is_v4: bool) {
+        // Select address-family-specific intersection check to avoid branching in the loop
         let check_fn: fn(&ExclusionSet, u128, u128) -> bool = if is_v4 {
             ExclusionSet::intersects_v4
         } else {
             ExclusionSet::intersects_v6
         };
 
-        // Walk all internal nodes with leaf_count >= 2
+        // Pass 1: mark internal nodes with leaf_count >= 2 that intersect exclusions
         for idx in 0..self.arena.len() {
             let node = &self.arena[idx];
+            // Skip leaves and nodes that can't be collapsed (single-leaf subtrees)
             if node.is_leaf || node.leaf_count < 2 {
                 continue;
             }
@@ -454,8 +539,7 @@ impl BinaryTrie {
                 continue;
             }
 
-            // Check if the excluded IPs are fully covered by input leaves under this node.
-            // If coverage == capacity, all IPs are already input-covered, so exclusion is moot.
+            // If all IPs in this range are already input-covered, collapsing adds no new exposure
             let capacity = self.capacity(idx as u32);
             let coverage = self.arena[idx].coverage;
             if coverage >= capacity {
@@ -465,7 +549,8 @@ impl BinaryTrie {
             self.arena[idx].is_excluded = true;
         }
 
-        // Propagate upward: ancestors of excluded nodes must also be excluded
+        // Pass 2: propagate exclusion upward to all ancestors
+        // Separate pass ensures all direct exclusion marks from Pass 1 are complete before propagating to ancestors
         for idx in 0..self.arena.len() {
             if !self.arena[idx].is_excluded {
                 continue;
@@ -473,7 +558,7 @@ impl BinaryTrie {
             let mut ancestor = self.arena[idx].parent;
             while ancestor != INVALID {
                 if self.arena[ancestor as usize].is_excluded {
-                    break; // already marked, ancestors above are too
+                    break;
                 }
                 self.arena[ancestor as usize].is_excluded = true;
                 ancestor = self.arena[ancestor as usize].parent;
@@ -499,6 +584,7 @@ impl BinaryTrie {
             } else if prefix_len == 0 {
                 u128::MAX
             } else {
+                // Fill host bits with 1s
                 start | ((1u128 << (128 - prefix_len)) - 1)
             };
             (start, end)

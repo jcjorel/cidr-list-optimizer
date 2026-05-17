@@ -1,10 +1,16 @@
+//! Exclusion zone support for the CIDR optimizer.
+//!
+//! Provides [`ExclusionSet`] which maintains sorted, non-overlapping intervals
+//! for binary-search-pruned intersection queries, preventing protected CIDR ranges from
+//! being absorbed by widened supernets during budget-constrained optimization.
+
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 use crate::lossless;
 use crate::lossless::SourceMapPrefix;
 use crate::types::ExclusionEntry;
 
-/// Sorted non-overlapping intervals for O(log E) intersection queries.
+/// Sorted non-overlapping intervals (post-aggregation) for binary-search-pruned intersection queries.
 pub struct ExclusionSet {
     /// IPv4 intervals as (start, end) inclusive, sorted by start.
     ipv4_ranges: Vec<(u128, u128)>,
@@ -19,7 +25,9 @@ impl ExclusionSet {
         let mut v4_input: Vec<(usize, Ipv4Net)> = Vec::new();
         let mut v6_input: Vec<(usize, Ipv6Net)> = Vec::new();
 
+        // Each address family is aggregated independently because IPv4 and IPv6 intervals are incomparable
         for (i, entry) in entries.iter().enumerate() {
+            // Truncate to canonical network address — required for correct lossless aggregation
             match entry.prefix {
                 IpNet::V4(v4) => v4_input.push((i, v4.trunc())),
                 IpNet::V6(v6) => v6_input.push((i, v6.trunc())),
@@ -45,12 +53,12 @@ impl ExclusionSet {
         Self::intersects_ranges(&self.ipv6_ranges, candidate_start, candidate_end)
     }
 
-    /// Returns true if the exclusion set has no entries for the given address family.
+    /// Returns true if the exclusion set has no IPv4 entries.
     pub fn is_empty_v4(&self) -> bool {
         self.ipv4_ranges.is_empty()
     }
 
-    /// Returns true if the exclusion set has no entries for the given address family.
+    /// Returns true if the exclusion set has no IPv6 entries.
     pub fn is_empty_v6(&self) -> bool {
         self.ipv6_ranges.is_empty()
     }
@@ -75,13 +83,16 @@ impl ExclusionSet {
         Self::find_intersecting(entries, candidate_start, candidate_end, false)
     }
 
+    /// Precondition: ranges are sorted and non-overlapping. Find the last range starting
+    /// at or before candidate_end; overlap exists iff that range extends into the candidate interval.
     fn intersects_ranges(ranges: &[(u128, u128)], candidate_start: u128, candidate_end: u128) -> bool {
-        // Find first range whose start > candidate_end
         let idx = ranges.partition_point(|&(start, _)| start <= candidate_end);
         idx > 0 && ranges[idx - 1].1 >= candidate_start
     }
 
+    /// Convert aggregated IPv4 prefixes into sorted numeric intervals for binary search.
     fn to_intervals_v4(agg: &[SourceMapPrefix<Ipv4Net>]) -> Vec<(u128, u128)> {
+        // Numeric intervals enable O(log E) binary-search intersection checks
         let mut intervals: Vec<(u128, u128)> = agg
             .iter()
             .map(|e| {
@@ -90,16 +101,21 @@ impl ExclusionSet {
                 (start, end)
             })
             .collect();
+        // Sort by start address — required for binary search in intersects_ranges
         intervals.sort_unstable_by_key(|&(s, _)| s);
         intervals
     }
 
+    /// Convert aggregated IPv6 prefixes into sorted numeric intervals for binary search.
     fn to_intervals_v6(agg: &[SourceMapPrefix<Ipv6Net>]) -> Vec<(u128, u128)> {
+        // Same approach as to_intervals_v4 but with 128-bit address arithmetic
         let mut intervals: Vec<(u128, u128)> = agg
             .iter()
             .map(|e| {
                 let start = u128::from(e.prefix.network());
                 let pl = e.prefix.prefix_len();
+                // Compute last address: /128 is a single host, /0 spans all addresses,
+                // general case uses bitmask (special-cased to avoid 1u128 << 128 overflow)
                 let end = if pl == 128 {
                     start
                 } else if pl == 0 {
@@ -114,6 +130,9 @@ impl ExclusionSet {
         intervals
     }
 
+    /// Linear scan over entries to collect those intersecting the candidate range.
+    /// Unlike `intersects_ranges` (which only returns bool), this needs to return
+    /// references to the original entries, which aren't stored in the sorted interval vec.
     fn find_intersecting(
         entries: &[ExclusionEntry],
         candidate_start: u128,
@@ -130,6 +149,7 @@ impl ExclusionSet {
                     IpNet::V6(v6) if !is_v4 => {
                         let s = u128::from(v6.network());
                         let pl = v6.prefix_len();
+                        // Last address via bitmask — special cases avoid 1u128 << 128 overflow (mirrors to_intervals_v6)
                         let e = if pl == 128 { s } else if pl == 0 { u128::MAX } else { s | ((1u128 << (128 - pl)) - 1) };
                         (s, e)
                     }
