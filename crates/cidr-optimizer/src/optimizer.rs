@@ -382,7 +382,7 @@ mod tests {
         use crate::types::PreferredEntry;
 
         // Two /24s with a gap: 10.0.0.0/24 and 10.0.2.0/24
-        // Gap is 10.0.1.0/24 (256 IPs). Preferred covers the gap.
+        // Merge to /22 introduces 512 IPs over-coverage (10.0.1.0/24 + 10.0.3.0/24). Preferred covers 10.0.1.0/24.
         let entries = vec![
             SourceMapPrefix { prefix: "10.0.0.0/24".parse().unwrap(), source_indices: vec![0], coverage: 256, preferred_overlap_in_coverage: 0 },
             SourceMapPrefix { prefix: "10.0.2.0/24".parse().unwrap(), source_indices: vec![1], coverage: 256, preferred_overlap_in_coverage: 0 },
@@ -397,6 +397,7 @@ mod tests {
 
         let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
         trie.mark_preferred_overlaps(&pref_set, true);
+        // max_coverage=512: allows the full /22 merge (512 IPs of over-coverage)
         let _leaves = optimize_trie(&mut trie, 1, None, 512, &pref_set, None);
         // Should merge since preferred covers the gap
         assert_eq!(trie.total_leaf_count(), 1);
@@ -424,11 +425,11 @@ mod tests {
         let mut trie = BinaryTrie::build_from_v4(&entries).unwrap();
         trie.mark_preferred_overlaps(&pref_set, true);
         // max_non_preferred_ratio=0 means no non-preferred over-coverage allowed
+        // max_coverage=512: would allow /22 merge if not blocked by non-preferred ratio
         let _leaves = optimize_trie(&mut trie, 1, None, 512, &pref_set, Some(0.0));
-        // The /23 merge (10.0.0.0/23) has gap=10.0.1.0/24 which is fully preferred → allowed
-        // But to get to 1 entry we'd need /22 which has non-preferred gap → blocked
-        // Actually /23 merge of 10.0.0.0/24 + 10.0.1.0/24 doesn't help since 10.0.1.0/24 isn't input.
-        // The two inputs share a /22 parent. Let's just verify it doesn't collapse to 1.
-        assert!(trie.total_leaf_count() >= 2);
+        // /22 merge would absorb 10.0.3.0/24 (not preferred) → blocked by ratio cap.
+        // Neither /23 parent helps: each input is alone in its /23 subtree.
+        // Result: both leaves remain, target=1 cannot be reached.
+        assert_eq!(trie.total_leaf_count(), 2);
     }
 }

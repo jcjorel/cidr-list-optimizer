@@ -242,4 +242,18 @@ mod tests {
         // /48 has 2^80 IPs
         assert_eq!(set.overlap_count_v6(start, end), 1u128 << 80);
     }
+
+    #[test]
+    fn overlapping_preferred_entries_deduplicated() {
+        // 10.0.0.0/24 and 10.0.0.0/25 overlap — lossless aggregation deduplicates to /24.
+        let entries = vec![
+            PreferredEntry { prefix: "10.0.0.0/24".parse().unwrap(), source: "a".into(), comment: None },
+            PreferredEntry { prefix: "10.0.0.0/25".parse().unwrap(), source: "b".into(), comment: None },
+        ];
+        let set = PreferredSet::build(&entries);
+        let start: u128 = u32::from("10.0.0.0".parse::<std::net::Ipv4Addr>().unwrap()) as u128;
+        let end: u128 = u32::from("10.0.0.255".parse::<std::net::Ipv4Addr>().unwrap()) as u128;
+        // Must count 256, not 384 (no double-counting from overlap)
+        assert_eq!(set.overlap_count_v4(start, end), 256);
+    }
 }
