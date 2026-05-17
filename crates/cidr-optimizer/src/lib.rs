@@ -692,23 +692,23 @@ mod tests {
 
     #[test]
     fn optimize_max_over_coverage_stops_at_ratio() {
-        // 4 scattered /32s — merging all to /30 would give 4 IPs capacity, 0 original = 4 over-coverage
-        // With ratio=1.0 (100%), over-coverage must stay ≤ input_ips
+        // Non-sibling /32s that won't losslessly merge, forcing the MaxOverCoverage lossy path.
+        // 10.0.0.0/32 and 10.0.0.2/32 are NOT siblings (sibling of .0 is .1, sibling of .2 is .3).
+        // Merging them requires widening to /30 (4 IPs), costing 2 IPs over-coverage.
+        // With ratio=0.5 (50%), allowed over-coverage = 2 * 0.5 = 1 IP → merge is blocked.
         let prefixes: Vec<IpNet> = vec![
             "10.0.0.0/32".parse().unwrap(),
-            "10.0.0.1/32".parse().unwrap(),
             "10.0.0.2/32".parse().unwrap(),
-            "10.0.0.3/32".parse().unwrap(),
         ];
         let config = OptimizerConfig {
-            ipv4_target: Some(TargetSpec::MaxOverCoverage(1.0)),
+            ipv4_target: Some(TargetSpec::MaxOverCoverage(0.5)),
             ..Default::default()
         };
         let result = optimize(&prefixes, &config).unwrap();
-        // Should merge but respect ratio — result count depends on greedy loop
-        // Key assertion: over-coverage ≤ input_ips (4 IPs * 1.0 = 4)
-        assert!(result.stats.total_ipv4_over_coverage <= 4);
-        // target_binding is always false for MaxOverCoverage
+        // Ratio cap should prevent merging: 2 entries remain
+        assert_eq!(result.entries.len(), 2,
+            "ratio cap should prevent merge, got {} entries", result.entries.len());
+        assert_eq!(result.stats.total_ipv4_over_coverage, 0);
         assert!(!result.stats.ipv4_target_binding);
     }
 

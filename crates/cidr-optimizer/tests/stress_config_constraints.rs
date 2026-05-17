@@ -32,11 +32,13 @@ fn run_ratio_cap(count: u32, stride: u64, label: &str) {
     // Ratio cap should prevent reaching target of 10
     assert!(result.entries.len() > 10,
         "{}: expected > 10 entries due to ratio cap, got {}", label, result.entries.len());
-    // Verify over-coverage ratio is respected
+    // Verify over-coverage ratio is respected (denominator = input covered IPs, not 2^32)
     let total_over: u128 = result.entries.iter().map(|e| e.over_coverage).sum();
-    let ratio = total_over as f64 / (1u64 << 32) as f64;
+    let input_covered = result.stats.input_ipv4_covered_ips;
+    let ratio = total_over as f64 / input_covered as f64;
     assert!(ratio <= 0.01 + 1e-9,
-        "{}: over-coverage ratio {} exceeds 0.01", label, ratio);
+        "{}: over-coverage ratio {} exceeds 0.01 (over={}, input_covered={})",
+        label, ratio, total_over, input_covered);
 }
 
 #[test]

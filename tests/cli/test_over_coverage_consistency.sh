@@ -7,6 +7,7 @@
 #   3. Assert actual over-coverage from (2) is <= budget Y%
 
 set -euo pipefail
+export LC_ALL=C
 source "$(dirname "$0")/lib.sh"
 
 ensure_binary
