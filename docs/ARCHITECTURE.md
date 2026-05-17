@@ -29,6 +29,8 @@
 ┌─────────────────────────────┐ ┌─────────────────────────────┐
 │  Phase 3: Lossy (IPv4)      │ │  Phase 3: Lossy (IPv6)      │
 │  • Path-compressed trie     │ │  • Path-compressed trie     │
+│  • Exclusion marking        │ │  • Exclusion marking        │
+│  • Preferred cost discount  │ │  • Preferred cost discount  │
 │  • Cost-efficiency greedy   │ │  • Cost-efficiency greedy   │
 │  • Ratio-capped stopping    │ │  • Ratio-capped stopping    │
 │  (skipped if within budget) │ │  (skipped if within budget) │
@@ -39,7 +41,7 @@
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Phase 4: Result Assembly                                           │
 │  • Leaf extraction & sorting (IPv4 before IPv6, by network addr)    │
-│  • Source-map computation (binary search, opt-in)                    │
+│  • Source-map computation (binary search, opt-in)                   │
 │  • Coverage validation                                              │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -100,9 +102,12 @@ When lossless output exceeds the target budget:
 4. **Initialize min-heap** with all internal nodes where `leaf_count ≥ 2` and `is_excluded = false`, keyed by cost-efficiency:
 
 ```
-efficiency = cost / (leaf_count - 1)
+efficiency = effective_cost / (leaf_count - 1)
 cost = capacity(node) - coverage(node)
+effective_cost = cost - collapsed_cost_sum - preferred_discount
 ```
+
+When preferred CIDRs are configured, `preferred_discount` subtracts the preferred IPs in the gap from the effective cost, making merges into preferred space cheaper. Without preferred CIDRs, `effective_cost = cost - collapsed_cost_sum`.
 
 5. **Greedy collapse loop**: Pop minimum-efficiency node, verify freshness via generation counter, check ratio cap, execute collapse (mark as leaf, invalidate descendants), update ancestors, push updated ancestors back into heap. Repeat until `entry_count ≤ target` or heap exhausted.
 
@@ -123,11 +128,13 @@ Remaining trie leaves are collected as output prefixes, sorted by network addres
 ### Trie Node Layout
 
 ```
-#[repr(C)]  // 80 bytes, fixed layout
+#[repr(C)]  // 112 bytes, fixed layout
 TrieNode {
     skip_bits: u128,               // The compressed bit pattern
     coverage: u128,                // Input IPs covered by this subtree
     collapsed_cost_sum: u128,      // Cumulative over-coverage of collapsed descendants
+    preferred_overlap: u128,       // Preferred-set IPs overlapping this subtree's coverage
+    preferred_overlap_in_coverage: u128, // Preferred overlap restricted to actually-covered addresses
     children: [NodeIdx; 2],        // Left/right child indices (INVALID = u32::MAX sentinel)
     parent: NodeIdx,               // Parent index for ancestor traversal
     leaf_count: u32,               // Number of leaves in subtree
@@ -136,11 +143,11 @@ TrieNode {
     is_leaf: bool,                 // Whether this is a current leaf
     skip_len: u8,                  // Path-compressed bits (0 = no compression)
     is_excluded: bool,             // Whether this node intersects an exclusion zone
-    _pad: [u8; 8],                 // Padding to reach 80-byte alignment
+    _pad: [u8; 4],                 // Padding to reach 112-byte alignment
 }
 ```
 
-`NodeIdx = u32`. Children use `u32::MAX` as an invalid sentinel rather than `Option<u32>` to maintain the fixed 80-byte layout. The `parent` field enables O(depth) ancestor traversal during collapse updates. `collapsed_cost_sum` tracks cumulative over-coverage of already-collapsed descendants, enabling correct incremental over-coverage accounting without subtree re-traversal.
+`NodeIdx = u32`. Children use `u32::MAX` as an invalid sentinel rather than `Option<u32>` to maintain the fixed 112-byte layout. The `parent` field enables O(depth) ancestor traversal during collapse updates. `collapsed_cost_sum` tracks cumulative over-coverage of already-collapsed descendants, enabling correct incremental over-coverage accounting without subtree re-traversal. `preferred_overlap` and `preferred_overlap_in_coverage` track how much of the subtree's coverage falls within preferred zones — used to compute the cost discount during greedy optimization.
 
 Nodes are stored in a contiguous arena (`Vec<TrieNode>`) indexed by `u32`, giving O(1) access and cache-friendly traversal. Arena overflow (> 2³² nodes) returns an error.
 
@@ -225,6 +232,41 @@ let exceeds = over.checked_mul(SCALE)
 
 The ratio tracks only over-coverage introduced by the lossy greedy phase. Over-coverage from `max_prefix_len` truncation is excluded from the ratio check but included in final per-entry reporting.
 
+## Preferred Over-Coverage
+
+When preferred CIDRs are configured, the optimizer distinguishes between widening into "preferred" address space (acceptable) and "non-preferred" space (costly). This steers merges toward preferred zones without changing the fundamental greedy algorithm.
+
+### Cost Discounting
+
+The effective cost of collapsing a node is reduced by the number of preferred IPs in the gap (over-coverage region):
+
+```
+net_new_over = cost(node) - collapsed_cost_sum(node)
+preferred_in_gap = preferred_overlap(node_interval) - preferred_overlap(node)
+effective_cost = net_new_over - min(preferred_in_gap, net_new_over)
+```
+
+Where `preferred_overlap(interval)` queries the PreferredSet (sorted non-overlapping intervals built via lossless aggregation of preferred entries) using binary-search-pruned overlap counting. `preferred_overlap(node)` tracks preferred IPs already covered by existing leaves — only the gap portion is discounted.
+
+### Dual-Cap System
+
+Two independent ratio caps can be active simultaneously:
+
+1. **Global cap** (`max_over_coverage_ratio`): bounds total over-coverage / input covered IPs
+2. **Non-preferred cap** (`max_non_preferred_over_coverage_ratio`): bounds only over-coverage outside preferred zones / input covered IPs
+
+The greedy loop tracks `current_non_preferred_over_coverage` incrementally:
+
+```
+non_preferred_in_gap = net_new_over - min(preferred_in_gap, net_new_over)
+```
+
+Both caps are checked before each collapse — the loop breaks when either would be exceeded.
+
+### PreferredSet Data Structure
+
+Built from `Vec<PreferredEntry>` via lossless aggregation (same algorithm as Phase 2) to produce non-overlapping intervals that prevent double-counting. Stored as sorted `Vec<(u128, u128)>` per address family. Overlap queries use `partition_point` for binary search to find the upper bound, then linear scan of candidate intervals — O(log P + k) where P is the number of preferred intervals and k is the number overlapping the query.
+
 ## Complexity
 
 | Phase | Time | Space |
@@ -244,15 +286,15 @@ Overall: **O(n + k log k)** time, **O(n)** space. Since k ≤ n (lossless output
 | Parsed input | ~16 bytes | 16 MB |
 | Radix sort buffer | ~16 bytes | 16 MB |
 | Lossless output (est. 200K) | ~32 bytes | 6 MB |
-| Path-compressed trie (est. 400K nodes) | ~80 bytes | 32 MB |
+| Path-compressed trie (est. 400K nodes) | ~112 bytes | 44 MB |
 | BinaryHeap | ~24 bytes/entry | 5 MB |
-| **Total (no source-map)** | | **~75 MB** |
+| **Total (no source-map)** | | **~87 MB** |
 
 With source-map: add ~24 bytes/input entry for `source_indices` storage (+24 MB for 1M entries).
 
-Worst case (scattered /32s, no sharing): trie reaches ~2× lossless count nodes. For 500K lossless entries: ~80 MB trie. Total stays well under 2 GB for IPv4.
+Worst case (scattered /32s, no sharing): trie reaches ~2× lossless count nodes. For 500K lossless entries: ~112 MB trie. Total stays well under 2 GB for IPv4.
 
-IPv6 /128 entries: Path compression is critical. Without it, 100K scattered /128s would create 12.8M nodes (1 GB). With path compression: ~200K–400K nodes (~32 MB).
+IPv6 /128 entries: Path compression is critical. Without it, 100K scattered /128s would create 12.8M nodes (1.4 GB). With path compression: ~200K–400K nodes (~44 MB).
 
 ## Crate Structure & Module Responsibilities
 
@@ -262,14 +304,17 @@ crates/
 │   └── src/
 │       ├── lib.rs               Public API surface: optimize(), optimize_with_progress(),
 │       │                        optimize_from_reader(), validate_coverage(),
-│       │                        parse_cidrs(), parse_exclusions(). Orchestrates
-│       │                        the full pipeline (partition → lossless → lossy → assemble).
-│       │                        Owns the coverage validation invariant. Builds ExclusionSet
-│       │                        and passes to lossy phase. Detects exclusion-constrained
-│       │                        state. Populates exclusion_collisions on output entries.
+│       │                        parse_cidrs(), parse_exclusions(), parse_preferred().
+│       │                        Orchestrates the full pipeline (partition → lossless →
+│       │                        lossy → assemble). Owns the coverage validation invariant.
+│       │                        Builds ExclusionSet and PreferredSet, passes both to the
+│       │                        lossy phase. Detects exclusion-constrained state.
+│       │                        Populates exclusion_collisions and preferred_contributions
+│       │                        on output entries.
 │       ├── types.rs             Public data types: OptimizerConfig, TargetSpec,
 │       │                        OptimizationResult, AggregatedEntry, OptimizationStats,
-│       │                        ExclusionEntry, ExclusionCollision, ParsedCidr, InputEntry,
+│       │                        ExclusionEntry, ExclusionCollision, PreferredEntry,
+│       │                        PreferredContribution, ParsedCidr, InputEntry,
 │       │                        ReaderResult, Phase, AddressFamily. Pure data definitions
 │       │                        except TargetSpec
 │       │                        which implements FromStr for parsing target specification
@@ -279,9 +324,9 @@ crates/
 │       │                        target-spec parsing). Implements From conversions
 │       │                        between them.
 │       ├── parser.rs            Line-by-line input parsing with index assignment.
-│       │                        Exposes parse_cidrs() and parse_exclusions() as
-│       │                        reusable public APIs (re-exported at crate root).
-│       │                        Handles comments, blank lines, normalization warnings.
+│       │                        Exposes parse_cidrs(), parse_exclusions(), and
+│       │                        parse_preferred() as reusable public APIs (re-exported
+│       │                        at crate root). Handles comments, blank lines, normalization warnings.
 │       │                        Collects input metadata (original text, inline comments)
 │       │                        when source-map is enabled. Enforces 4 KiB per-line
 │       │                        length limit. parse_input() wraps parse_cidrs() with
@@ -292,18 +337,27 @@ crates/
 │       │                        SourceMapPrefix<T> carrying source indices.
 │       ├── trie.rs              Path-compressed binary trie: arena-allocated nodes,
 │       │                        construction from lossless output, bottom-up coverage/
-│       │                        leaf_count computation, collapse execution, leaf
-│       │                        extraction, and mark_exclusions() which marks nodes
-│       │                        whose intervals intersect exclusion ranges.
+│       │                        leaf_count/preferred_overlap computation, collapse
+│       │                        execution, leaf extraction, and mark_exclusions() which
+│       │                        marks nodes whose intervals intersect exclusion ranges.
 │       ├── optimizer.rs         Greedy lossy optimizer: BinaryHeap management, cost-
 │       │                        efficiency ranking, generation-based staleness, ratio
-│       │                        cap checking, and ancestor update propagation. Skips
-│       │                        collapse of nodes where is_excluded=true. Operates
-│       │                        on BinaryTrie without knowledge of address family.
+│       │                        cap checking, preferred-set cost discounting (subtracts
+│       │                        preferred overlap from effective cost), dual-cap ratio
+│       │                        checking (global + non-preferred), and ancestor update
+│       │                        propagation. Skips collapse of nodes where
+│       │                        is_excluded=true. Operates on BinaryTrie without
+│       │                        knowledge of address family.
 │       ├── exclusion.rs         Exclusion set construction from ExclusionEntry list.
 │       │                        Losslessly aggregates exclusion prefixes into sorted
 │       │                        non-overlapping intervals for O(log E) intersection
 │       │                        queries during lossy optimization.
+│       ├── preferred.rs         Preferred-set construction from PreferredEntry list.
+│       │                        Losslessly aggregates preferred prefixes into sorted
+│       │                        non-overlapping intervals for binary-search-pruned
+│       │                        overlap counting. Provides overlap_count_v4/v6 for
+│       │                        cost discounting and find_overlapping_v4/v6 for
+│       │                        source-map preferred_contributions tracking.
 │       └── source_map.rs        Post-optimization source-map reconstruction via binary
 │                                search on sorted input. Maps each output prefix to the
 │                                set of original input indices it covers.
@@ -316,7 +370,7 @@ crates/
                                  Contains no optimization logic.
 ```
 
-**Interface boundaries**: The CLI depends on the library's public API only (`optimize`, `optimize_from_reader`, `parse_cidrs`, `parse_exclusions`, `TargetSpec::from_str()`, `OptimizerConfig`, result types). The library modules have a layered dependency: `lib.rs` → `lossless` → (radix sort internals); `lib.rs` → `trie` → `optimizer`; `lib.rs` → `exclusion`; `trie` → `exclusion` (for `mark_exclusions`); `lib.rs` → `source_map`. The `trie` and `optimizer` modules are decoupled — `optimizer` receives a `&mut BinaryTrie` and drives the greedy loop without knowing how the trie was constructed.
+**Interface boundaries**: The CLI depends on the library's public API only (`optimize`, `optimize_from_reader`, `parse_cidrs`, `parse_exclusions`, `parse_preferred`, `TargetSpec::from_str()`, `OptimizerConfig`, result types). The library modules have a layered dependency: `lib.rs` → `lossless` → (radix sort internals); `lib.rs` → `trie` → `optimizer`; `lib.rs` → `exclusion`; `lib.rs` → `preferred`; `trie` → `exclusion` (for `mark_exclusions`); `optimizer` → `preferred` (for `PreferredSet` cost discounting); `lib.rs` → `source_map`. The `trie` and `optimizer` modules are decoupled — `optimizer` receives a `&mut BinaryTrie` and drives the greedy loop without knowing how the trie was constructed.
 
 ## References
 

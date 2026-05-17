@@ -13,8 +13,10 @@ AWS networking services impose hard limits on allow-list entries (Security Group
 - **Bounded over-coverage** — caps the percentage of extra addresses introduced so you never open more than you accept
 - **Over-coverage ratio targeting** — specify targets as `over-coverage=X%` to minimize entries while staying within a percentage bound
 - **Independent IPv4/IPv6 targets** — set separate entry budgets for IPv4 and IPv6 ranges (e.g., optimize IPv4 down to 50 entries while leaving IPv6 as-is) because real-world lists like the AWS IP ranges are overwhelmingly IPv4
+- **Prefix length clamping** — truncate overly-specific prefixes to a maximum length (`--max-prefix-len-v4`/`--max-prefix-len-v6`) before aggregation, useful when downstream systems have prefix length restrictions
 - **Inline comment support** — text after `#` on CIDR lines is captured and preserved in source-map output for traceability
 - **Source-map tracking** — traces every output CIDR back to its original inputs for audit and compliance review
+- **Preferred over-coverage zones** — designate CIDRs where widening is acceptable, steering the optimizer toward preferred address space and away from unrelated ranges
 - **Exclusion zones** — protect specific CIDR ranges from being absorbed by widened supernets
 - **AWS-native output** — emits JSON ready for Security Groups, Prefix Lists, and WAF IP Sets with no post-processing
 - **Deterministic output** — same input always produces the same result, safe for CI/CD diffing and GitOps workflows

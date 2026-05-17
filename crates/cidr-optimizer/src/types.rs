@@ -49,48 +49,75 @@ impl FromStr for TargetSpec {
 /// A single CIDR entry as parsed from input, retaining source location and inline comment for source-map tracking.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedCidr {
+    /// The parsed network prefix (normalized to canonical form via `.trunc()`).
     pub prefix: IpNet,
+    /// The CIDR text as it appeared in input (excluding any inline `#` comment).
     pub raw_text: String,
+    /// Inline comment text following `#` on the same line, without the `#` delimiter.
+    /// `None` if no comment was present.
     pub comment: Option<String>,
+    /// 1-based line number in the input source.
     pub line_number: usize,
 }
 
-/// A single exclusion entry: a prefix that must not appear as over-coverage.
+/// A single exclusion entry: a CIDR range protected from being absorbed by widened supernets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExclusionEntry {
+    /// The protected network prefix.
     pub prefix: IpNet,
+    /// Provenance label identifying where this exclusion was defined
+    /// (e.g., filename or CLI argument identifier).
     pub source: String,
+    /// Optional human-readable annotation (from inline `#` comment in the source file).
     pub comment: Option<String>,
 }
 
-/// A single preferred over-coverage entry: widening into this space is discounted.
+/// A single preferred over-coverage entry: widening into this space is discounted in the cost function.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreferredEntry {
+    /// The preferred network prefix where over-coverage is acceptable.
     pub prefix: IpNet,
+    /// Provenance label identifying where this entry was defined
+    /// (e.g., filename or CLI argument identifier).
     pub source: String,
+    /// Optional human-readable annotation (from inline `#` comment in the source file).
     pub comment: Option<String>,
 }
 
-/// Records which preferred CIDR contributed to a widening discount (for source-map).
+/// Records which preferred CIDR contributed to a widening discount (for source-map audit).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreferredContribution {
+    /// String representation of the preferred CIDR that overlaps the output entry's over-coverage.
     pub prefix: String,
+    /// Provenance label of the preferred entry (e.g., source filename).
     pub source: String,
+    /// Optional annotation from the preferred entry's inline comment.
     pub comment: Option<String>,
 }
 
-/// Records a collision between an input prefix and an exclusion entry.
+/// Records a collision between an output prefix and an exclusion zone.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExclusionCollision {
+    /// String representation of the exclusion CIDR that intersects the output prefix.
     pub exclusion_prefix: String,
+    /// Provenance label of the exclusion entry (e.g., source filename).
     pub exclusion_source: String,
+    /// Optional annotation from the exclusion entry's inline comment.
     pub exclusion_comment: Option<String>,
 }
 
 /// Configuration for the CIDR optimizer.
 pub struct OptimizerConfig {
+    /// Entry-count or over-coverage target for IPv4 prefixes.
+    /// `None` means lossless-only (no lossy reduction applied).
     pub ipv4_target: Option<TargetSpec>,
+    /// Entry-count or over-coverage target for IPv6 prefixes.
+    /// `None` means lossless-only (no lossy reduction applied).
     pub ipv6_target: Option<TargetSpec>,
+    /// Global cap on over-coverage as a decimal ratio (e.g., 0.05 = 5%).
+    /// The optimizer stops widening once total extra IPs exceed
+    /// `input_covered_ips * ratio`. Valid range: \[0.0, 10.0\] (0–1000%).
+    /// `None` means no cap (optimizer pursues the entry target unconditionally).
     pub max_over_coverage_ratio: Option<f64>,
     /// Maximum prefix length for IPv4 inputs — e.g., 24 means all prefixes more specific than /24 are truncated to /24 before aggregation.
     pub max_prefix_len_v4: u8,
@@ -98,10 +125,17 @@ pub struct OptimizerConfig {
     pub max_prefix_len_v6: u8,
     /// Pre-allocation guard: reject inputs exceeding this count before building the prefix tree.
     pub max_input_entries: usize,
+    /// Enables source-map recomputation for lossy entries and preferred-contribution
+    /// annotation. Lossless entries always carry `source_indices` regardless of this flag.
     pub source_map: bool,
+    /// CIDR ranges protected from absorption by widened supernets.
+    /// The optimizer will not merge prefixes if doing so would cover an exclusion zone.
     pub exclusions: Vec<ExclusionEntry>,
+    /// CIDR ranges where widening is preferred. Over-coverage falling within
+    /// these ranges is discounted in the optimizer's cost function.
     pub preferred_cidrs: Vec<PreferredEntry>,
     /// Constrains widening into non-preferred space independently of the global over-coverage cap.
+    /// Expressed as a decimal ratio (e.g., 0.02 = 2%). Requires `preferred_cidrs` to be non-empty.
     pub max_non_preferred_over_coverage_ratio: Option<f64>,
 }
 
@@ -129,24 +163,44 @@ pub enum AddressFamily {
     IPv6,
 }
 
-/// Progress information passed to callback.
+/// Progress phases reported to the callback during optimization.
 pub enum Phase {
-    Parsing { entries_read: usize },
-    Lossless { af: AddressFamily, entries_remaining: usize },
-    Lossy { af: AddressFamily, current_count: usize, target: usize },
+    /// Input parsing in progress.
+    Parsing {
+        /// Number of CIDR entries parsed so far.
+        entries_read: usize,
+    },
+    /// Lossless aggregation starting for an address family.
+    Lossless {
+        af: AddressFamily,
+        /// Number of entries entering the lossless phase (before aggregation).
+        entries_remaining: usize,
+    },
+    /// Lossy optimization starting for an address family.
+    Lossy {
+        af: AddressFamily,
+        /// Number of entries entering the lossy phase (lossless output count).
+        current_count: usize,
+        /// Entry budget the optimizer is pursuing.
+        target: usize,
+    },
+    /// All optimization phases complete.
     Done,
 }
 
 /// A single output prefix produced by optimization, with optional source-map and over-coverage tracking.
 pub struct AggregatedEntry {
     pub prefix: IpNet,
-    /// Original input indices that this output prefix covers (populated when source-map is enabled).
+    /// Original input indices that this output prefix covers.
+    /// Always populated for lossless entries; for lossy entries, populated only
+    /// when `OptimizerConfig::source_map` is enabled (via binary-search recomputation).
     pub source_indices: Option<Vec<usize>>,
     /// Number of extra IP addresses beyond the original input coverage (0 for lossless entries).
     pub over_coverage: u128,
     /// Exclusion zones that intersect this output prefix (populated when exclusions are configured).
     pub exclusion_collisions: Option<Vec<ExclusionCollision>>,
-    /// Portion of over-coverage that falls within preferred CIDR ranges (discounted from cost).
+    /// Number of over-coverage IP addresses that fall within preferred CIDR ranges.
+    /// These addresses are discounted in the optimizer's cost function. Always ≤ `over_coverage`.
     pub preferred_over_coverage: u128,
     /// Preferred entries that contributed to this entry's over-coverage (for source-map audit).
     pub preferred_contributions: Option<Vec<PreferredContribution>>,
@@ -168,11 +222,17 @@ pub struct OptimizationStats {
     pub total_ipv4_over_coverage: u128,
     /// Total extra IPv6 addresses introduced by widening (number of IPs, not entries).
     pub total_ipv6_over_coverage: u128,
+    /// Ratio of input to output IPv4 entry count (input_count / output_count).
+    /// Values > 1.0 indicate compression; 1.0 means no reduction occurred.
     pub ipv4_compression_ratio: f64,
+    /// Ratio of input to output IPv6 entry count (input_count / output_count).
+    /// Values > 1.0 indicate compression; 1.0 means no reduction occurred.
     pub ipv6_compression_ratio: f64,
-    /// True when the IPv4 target was the binding constraint (lossless result exceeded target).
+    /// True when an entry-count target was binding for IPv4 (lossless result exceeded the entry budget).
+    /// Not set for `MaxOverCoverage` targets.
     pub ipv4_target_binding: bool,
-    /// True when the IPv6 target was the binding constraint (lossless result exceeded target).
+    /// True when an entry-count target was binding for IPv6 (lossless result exceeded the entry budget).
+    /// Not set for `MaxOverCoverage` targets.
     pub ipv6_target_binding: bool,
     /// True when exclusion zones prevented reaching the IPv4 entry target.
     pub ipv4_exclusion_constrained: bool,
@@ -186,16 +246,21 @@ pub struct OptimizationStats {
     pub total_ipv4_non_preferred_over_coverage: u128,
     /// Over-coverage IPs outside preferred ranges (IPv6): total - preferred.
     pub total_ipv6_non_preferred_over_coverage: u128,
-    /// Total IP addresses covered by the original IPv4 input set (before optimization).
+    /// Total IP addresses covered by the IPv4 input set after lossless aggregation
+    /// (reflects prefix-length clamping when `max_prefix_len_v4 < 32`).
     pub input_ipv4_covered_ips: u128,
-    /// Total IP addresses covered by the original IPv6 input set (before optimization).
+    /// Total IP addresses covered by the IPv6 input set after lossless aggregation
+    /// (reflects prefix-length clamping when `max_prefix_len_v6 < 128`).
     pub input_ipv6_covered_ips: u128,
 }
 
-/// A single input entry with its original text and optional inline comment.
+/// A single input entry with its original text and optional inline comment (for source-map output).
 #[derive(Clone, Debug, PartialEq)]
 pub struct InputEntry {
+    /// The original CIDR text as it appeared in input (trimmed, excluding inline `#` comment).
     pub original: String,
+    /// Inline comment text following `#`, without the `#` delimiter.
+    /// `None` if no comment was present.
     pub comment: Option<String>,
 }
 

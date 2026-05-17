@@ -26,6 +26,8 @@ cidr-optimizer [OPTIONS] [INPUT]
 | `--source-map <FILE>` | PathBuf | — | Write source-map JSON to FILE |
 | `--stats` | bool | false | Print statistics to stderr |
 | `--exclude-cidr <FILE>` | PathBuf | — | Exclusion CIDR file. Ranges in this file are protected from absorption during lossy optimization. Can be specified multiple times |
+| `--preferred-over-coverage-cidrs <FILE>` | PathBuf | — | Preferred over-coverage CIDR file. Widening into these ranges is discounted in cost calculations. Can be specified multiple times |
+| `--max-non-preferred-over-coverage <PCT>` | f64 | — | Maximum non-preferred over-coverage percentage. Caps widening into address space *outside* preferred zones independently of `--max-over-coverage`. Requires `--preferred-over-coverage-cidrs` |
 | `--warn-on-excluded-input` | bool | false | Warn on stderr when output prefixes overlap exclusion zones |
 
 ### Exit Codes
@@ -109,6 +111,55 @@ hint: reduce exclusion entries or raise the target
 
 For library integration, see [Developer API — ExclusionEntry](DEVELOPER_API.md#exclusionentry).
 
+## Preferred Over-Coverage Zones
+
+Designate CIDR ranges where widening is acceptable. When the optimizer must widen a prefix, it preferentially expands into preferred address space rather than unrelated ranges. This is useful when you own adjacent IP space and prefer over-coverage to land there rather than in third-party ranges.
+
+### File Format
+
+Same as input: one CIDR per line, `#` full-line comments, blank lines ignored, inline comments supported.
+
+```
+# Our own IP space — acceptable for over-coverage
+10.0.0.0/16    # corp allocation
+172.16.0.0/12  # internal ranges
+```
+
+### Usage
+
+```bash
+# Steer over-coverage toward your own IP space
+cidr-optimizer --ipv4-target 60 \
+  --preferred-over-coverage-cidrs our-space.txt \
+  partner-ips.txt
+
+# Also cap non-preferred over-coverage independently
+cidr-optimizer --ipv4-target 60 \
+  --preferred-over-coverage-cidrs our-space.txt \
+  --max-non-preferred-over-coverage 5 \
+  partner-ips.txt
+```
+
+### How It Works
+
+The optimizer discounts over-coverage that falls within preferred zones when ranking merge candidates. A merge that widens into preferred space has a lower effective cost than one that widens into unrelated space, making it more likely to be chosen.
+
+The `--max-non-preferred-over-coverage` flag adds a separate cap on over-coverage outside preferred zones. This is independent of `--max-over-coverage` (which caps *total* over-coverage). Both caps are checked — the optimizer stops when either is reached.
+
+### `--stats` Output with Preferred Zones
+
+When preferred CIDRs are configured, `--stats` shows a breakdown:
+
+```
+IPv4 over-coverage: 2.36% (98783 IPs)
+  Preferred: 1.80% (75264 IPs)
+  Non-preferred: 0.56% (23519 IPs)
+```
+
+### Programmatic Equivalent
+
+For library integration, see [Developer API — PreferredEntry](DEVELOPER_API.md#preferredentry).
+
 ## Library API
 
 For library integration (using `cidr-optimizer` as a Rust dependency), see the [Developer API Reference](DEVELOPER_API.md) which covers `OptimizerConfig`, progress callbacks, error handling, and complete integration examples.
@@ -146,16 +197,22 @@ One CIDR per line, sorted by network address ascending (IPv4 before IPv6):
     "output_ipv6_count": 0,
     "total_ipv4_over_coverage": 28456,
     "total_ipv6_over_coverage": 0,
+    "total_ipv4_preferred_over_coverage": 20000,
+    "total_ipv4_non_preferred_over_coverage": 8456,
     "ipv4_compression_ratio": 500.0,
     "ipv6_compression_ratio": 1.0,
     "ipv4_target_binding": true,
-    "ipv6_target_binding": false
+    "ipv6_target_binding": false,
+    "input_ipv4_covered_ips": 4194304,
+    "input_ipv6_covered_ips": 0
   },
   "exclusion_sources": [
     {"source": "internal.txt", "entry_count": 5}
   ]
 }
 ```
+
+The `total_ipv4_preferred_over_coverage`, `total_ipv6_preferred_over_coverage`, `total_ipv4_non_preferred_over_coverage`, and `total_ipv6_non_preferred_over_coverage` fields are omitted from JSON when their value is zero (i.e., when `--preferred-over-coverage-cidrs` is not used).
 
 Fields:
 - `prefix`: Output CIDR string
@@ -189,8 +246,12 @@ When `--source-map <FILE>` is specified, the detailed source mapping is written 
         {"index": 1, "cidr": "10.0.1.0/24", "comment": "partner-A"}
       ],
       "over_coverage": 512,
+      "preferred_over_coverage": 384,
       "exclusion_collisions": [
         {"exclusion_prefix": "10.0.1.0/24", "exclusion_source": "internal.txt", "exclusion_comment": "corp network"}
+      ],
+      "preferred_contributions": [
+        {"prefix": "10.0.0.0/21", "source": "our-space.txt", "comment": null}
       ]
     }
   ],
@@ -201,10 +262,14 @@ When `--source-map <FILE>` is specified, the detailed source mapping is written 
     "output_ipv6_count": 0,
     "total_ipv4_over_coverage": 28456,
     "total_ipv6_over_coverage": 0,
+    "total_ipv4_preferred_over_coverage": 20000,
+    "total_ipv4_non_preferred_over_coverage": 8456,
     "ipv4_compression_ratio": 500.0,
     "ipv6_compression_ratio": 1.0,
     "ipv4_target_binding": true,
-    "ipv6_target_binding": false
+    "ipv6_target_binding": false,
+    "input_ipv4_covered_ips": 4194304,
+    "input_ipv6_covered_ips": 0
   },
   "exclusion_sources": [
     {"source": "internal.txt", "entry_count": 5}
@@ -225,7 +290,9 @@ Each entry in the `entries` array contains:
 | `prefix` | string | Output CIDR (e.g. `"10.0.0.0/22"`) |
 | `sources` | array | Original inputs covered by this output prefix |
 | `over_coverage` | integer | IPs in this prefix not covered by any input |
+| `preferred_over_coverage` | integer or absent | IPs of over-coverage falling within preferred zones (omitted when zero) |
 | `exclusion_collisions` | array or absent | Exclusion entries that intersect this output prefix (omitted when none) |
+| `preferred_contributions` | array or absent | Preferred entries that contributed to this entry's over-coverage discount (omitted when none) |
 
 Each element in `exclusion_collisions`:
 
@@ -234,6 +301,14 @@ Each element in `exclusion_collisions`:
 | `exclusion_prefix` | string | The exclusion CIDR that intersects the output prefix |
 | `exclusion_source` | string | Origin filename of the exclusion entry |
 | `exclusion_comment` | string or null | Annotation from the exclusion entry |
+
+Each element in `preferred_contributions`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `prefix` | string | The preferred CIDR that overlaps the over-coverage |
+| `source` | string | Origin filename of the preferred entry |
+| `comment` | string or null | Annotation from the preferred entry |
 
 Each element in `sources`:
 
@@ -263,7 +338,15 @@ Printed to stderr (does not interfere with stdout output):
 ```
 IPv4: 500000 input → 1000 output (compression: 500.0x)
 IPv6: 0 input → 0 output (compression: 1.0x)
-IPv4 over-coverage: 28456 IPs
+IPv4 over-coverage: 0.68% (28456 IPs)
+```
+
+When preferred CIDRs are configured, an indented breakdown follows each over-coverage line:
+
+```
+IPv4 over-coverage: 2.36% (98783 IPs)
+  Preferred: 1.80% (75264 IPs)
+  Non-preferred: 0.56% (23519 IPs)
 ```
 
 When exclusion zones prevent meeting the target, the JSON stats include `ipv4_exclusion_constrained: true` and/or `ipv6_exclusion_constrained: true` (omitted when `false`).

@@ -20,10 +20,11 @@ The crate re-exports all public types from the root:
 pub use types::{
     AddressFamily, AggregatedEntry, ExclusionCollision, ExclusionEntry,
     InputEntry, OptimizerConfig, OptimizationResult, OptimizationStats,
-    ParsedCidr, Phase, ReaderResult, TargetSpec,
+    ParsedCidr, Phase, PreferredContribution, PreferredEntry,
+    ReaderResult, TargetSpec,
 };
 pub use error::{OptimizeError, OptimizerError};
-pub use parser::{parse_cidrs, parse_exclusions};
+pub use parser::{parse_cidrs, parse_exclusions, parse_preferred};
 ```
 
 ### Module Visibility
@@ -32,12 +33,13 @@ pub use parser::{parse_cidrs, parse_exclusions};
 |--------|-----------|-------|
 | `types` | `pub` | All data types, re-exported at root |
 | `error` | `pub` | Error enums, re-exported at root |
-| `parser` | `pub` | `parse_cidrs` and `parse_exclusions` re-exported at root; `parse_input` accessible but not re-exported |
+| `parser` | `pub` | `parse_cidrs`, `parse_exclusions`, and `parse_preferred` re-exported at root; `parse_input` accessible but not re-exported |
 | `lossless` | `pub` | Internal aggregation (not intended for direct use) |
 | `trie` | `pub` | Internal trie structure (not intended for direct use) |
 | `optimizer` | `pub` | Internal greedy optimizer (not intended for direct use) |
 | `source_map` | `pub` | Internal source-map computation (not intended for direct use) |
 | `exclusion` | `pub` | Exclusion set construction and intersection queries (not intended for direct use) |
+| `preferred` | `pub` | Preferred set construction and overlap queries (not intended for direct use) |
 
 ## Primary Functions
 
@@ -99,9 +101,18 @@ pub fn parse_exclusions(input: impl BufRead, source: &str) -> Result<Vec<Exclusi
 
 Parses a CIDR list into exclusion entries, tagging each with the given `source` name. Wraps `parse_cidrs` — same input format rules apply.
 
+### `parse_preferred`
+
+```rust
+pub fn parse_preferred(input: impl BufRead, source: &str) -> Result<Vec<PreferredEntry>, OptimizerError>
+```
+
+Parses a CIDR list into preferred over-coverage entries, tagging each with the given `source` name. Wraps `parse_cidrs` — same input format rules apply.
+
 ## `ParsedCidr`
 
 ```rust
+#[derive(Clone, Debug, PartialEq)]
 pub struct ParsedCidr {
     pub prefix: IpNet,
     pub raw_text: String,
@@ -120,6 +131,7 @@ pub struct ParsedCidr {
 ## `TargetSpec`
 
 ```rust
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TargetSpec {
     /// Fixed entry count target — reduce to at most N entries.
     EntryCount(usize),
@@ -137,6 +149,8 @@ pub enum TargetSpec {
 
 Returns `OptimizerError::TargetSpecParse` on invalid input (missing `%` suffix, non-numeric value, negative percentage).
 
+**Valid range for `MaxOverCoverage`**: The ratio must be in `(0.0, 10.0]` (exclusive of zero — zero over-coverage is meaningless as a target since it would prevent any merging). This differs from `max_over_coverage_ratio` which accepts `[0.0, 10.0]` (inclusive of zero, meaning "no over-coverage allowed").
+
 ## `OptimizerConfig` Fields
 
 | Field | Type | Default | Valid Range | Effect |
@@ -149,6 +163,8 @@ Returns `OptimizerError::TargetSpecParse` on invalid input (missing `%` suffix, 
 | `max_input_entries` | `usize` | `10_000_000` | 1..=∞ | Input size bound (prevents OOM) |
 | `source_map` | `bool` | `false` | — | Track which inputs map to each output prefix |
 | `exclusions` | `Vec<ExclusionEntry>` | `Vec::new()` | — | CIDR ranges protected from absorption during lossy optimization |
+| `preferred_cidrs` | `Vec<PreferredEntry>` | `Vec::new()` | — | CIDR ranges where over-coverage is discounted (widening into these is preferred) |
+| `max_non_preferred_over_coverage_ratio` | `Option<f64>` | `None` | 0.0..=10.0 | Separate ratio cap on over-coverage outside preferred zones. `None` = no separate cap. **Requires `preferred_cidrs` to be non-empty** — returns `InvalidConfig` otherwise |
 
 `OptimizerConfig` implements `Default`.
 
@@ -162,6 +178,7 @@ pub enum Phase {
     Done,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AddressFamily {
     IPv4,
     IPv6,
@@ -186,9 +203,11 @@ pub struct OptimizationResult {
 ```rust
 pub struct AggregatedEntry {
     pub prefix: IpNet,
-    pub source_indices: Option<Vec<usize>>,  // None if source_map disabled or no sources mapped
+    pub source_indices: Option<Vec<usize>>,  // Always populated for lossless entries; for lossy entries, populated only when source_map is enabled
     pub over_coverage: u128,
     pub exclusion_collisions: Option<Vec<ExclusionCollision>>,  // None if no collisions
+    pub preferred_over_coverage: u128,  // Over-coverage IPs within preferred zones
+    pub preferred_contributions: Option<Vec<PreferredContribution>>,  // None if no preferred overlap
 }
 ```
 
@@ -208,6 +227,12 @@ pub struct OptimizationStats {
     pub ipv6_target_binding: bool,
     pub ipv4_exclusion_constrained: bool,  // true if exclusions prevented meeting target
     pub ipv6_exclusion_constrained: bool,
+    pub total_ipv4_preferred_over_coverage: u128,  // Over-coverage within preferred zones
+    pub total_ipv6_preferred_over_coverage: u128,
+    pub total_ipv4_non_preferred_over_coverage: u128,  // Over-coverage outside preferred zones
+    pub total_ipv6_non_preferred_over_coverage: u128,
+    pub input_ipv4_covered_ips: u128,  // Total IPs covered by original IPv4 input
+    pub input_ipv6_covered_ips: u128,  // Total IPs covered by original IPv6 input
 }
 ```
 
@@ -223,6 +248,7 @@ pub struct ReaderResult {
 ### `InputEntry`
 
 ```rust
+#[derive(Clone, Debug, PartialEq)]
 pub struct InputEntry {
     pub original: String,
     pub comment: Option<String>,
@@ -405,9 +431,40 @@ for entry in &result.entries {
 }
 ```
 
+### With Preferred CIDRs
+
+```rust
+use cidr_optimizer::{optimize, PreferredEntry, OptimizerConfig, TargetSpec};
+
+let prefixes: Vec<ipnet::IpNet> = vec![
+    "10.0.0.0/24".parse().unwrap(),
+    "10.0.1.0/24".parse().unwrap(),
+    "10.0.4.0/24".parse().unwrap(),
+    "10.0.5.0/24".parse().unwrap(),
+];
+
+let config = OptimizerConfig {
+    ipv4_target: Some(TargetSpec::EntryCount(2)),
+    preferred_cidrs: vec![PreferredEntry {
+        prefix: "10.0.0.0/21".parse().unwrap(),
+        source: "our-space.txt".to_string(),
+        comment: Some("our allocation".to_string()),
+    }],
+    max_non_preferred_over_coverage_ratio: Some(0.05), // 5% cap on non-preferred
+    ..Default::default()
+};
+
+let result = optimize(&prefixes, &config).unwrap();
+for entry in &result.entries {
+    println!("{} (over-coverage: {} total, {} preferred)",
+        entry.prefix, entry.over_coverage, entry.preferred_over_coverage);
+}
+```
+
 ## `ExclusionEntry`
 
 ```rust
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExclusionEntry {
     pub prefix: IpNet,
     pub source: String,
@@ -424,6 +481,7 @@ pub struct ExclusionEntry {
 ## `ExclusionCollision`
 
 ```rust
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExclusionCollision {
     pub exclusion_prefix: String,
     pub exclusion_source: String,
@@ -438,6 +496,42 @@ pub struct ExclusionCollision {
 | `exclusion_comment` | `Option<String>` | Annotation from the exclusion entry |
 
 Populated on `AggregatedEntry.exclusion_collisions` when an output prefix overlaps one or more exclusion ranges. `None` when there are no collisions.
+
+## `PreferredEntry`
+
+```rust
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreferredEntry {
+    pub prefix: IpNet,
+    pub source: String,
+    pub comment: Option<String>,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `prefix` | `IpNet` | CIDR range where over-coverage is acceptable (discounted) |
+| `source` | `String` | Origin filename or identifier |
+| `comment` | `Option<String>` | Optional annotation |
+
+## `PreferredContribution`
+
+```rust
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreferredContribution {
+    pub prefix: String,
+    pub source: String,
+    pub comment: Option<String>,
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `prefix` | `String` | The preferred CIDR that overlaps the output entry's over-coverage |
+| `source` | `String` | Origin filename of the preferred entry |
+| `comment` | `Option<String>` | Annotation from the preferred entry |
+
+Populated on `AggregatedEntry.preferred_contributions` when an output prefix's over-coverage overlaps preferred zones. `None` when there is no preferred overlap.
 
 ## See Also
 

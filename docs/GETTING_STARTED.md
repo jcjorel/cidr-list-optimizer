@@ -72,7 +72,7 @@ Statistics (stderr):
 ```
 IPv4: 8 input → 4 output (compression: 2.0x)
 IPv6: 0 input → 0 output (compression: 1.0x)
-IPv4 over-coverage: 1024 IPs
+IPv4 over-coverage: 50.00% (1024 IPs)
 ```
 
 What happened: With a target of 4, the optimizer merged non-adjacent prefixes into wider CIDRs, accepting some over-coverage (IPs not in the original input that are now included). See [User Guide — `--max-over-coverage` Behavior](USER_GUIDE.md#--max-over-coverage-behavior) for how the default cap works.
@@ -333,6 +333,163 @@ Expected output:
 ```
 
 What happened: The exclusion zone blocked the merge that would have absorbed 10.0.2.0/24 into a wider supernet. The optimizer merged what it could (10.0.0.0/24 + 10.0.1.0/24 → /23) while respecting the exclusion. For full exclusion zone documentation, see [User Guide — Exclusion Zones](USER_GUIDE.md#exclusion-zones).
+
+## Scenario 10: Prefix Length Clamping
+
+**Goal**: Truncate overly-specific prefixes to a maximum length before aggregation.
+
+Create `host-routes.txt`:
+
+```
+10.0.0.1/32
+10.0.0.2/32
+10.0.0.100/32
+10.0.0.200/32
+10.0.1.5/32
+10.0.1.50/32
+```
+
+Run without clamping:
+
+```bash
+cidr-optimizer host-routes.txt
+```
+
+Output: 6 entries (no siblings to merge — scattered /32s).
+
+Now clamp to /24:
+
+```bash
+cidr-optimizer --max-prefix-len-v4 24 --stats host-routes.txt
+```
+
+Expected output:
+
+```
+10.0.0.0/23
+```
+
+What happened: All /32 host routes were truncated to /24 before aggregation. The resulting 10.0.0.0/24 and 10.0.1.0/24 are siblings and merged losslessly into 10.0.0.0/23. This is useful when downstream systems have prefix length restrictions or when /32 granularity is unnecessary. See [User Guide](USER_GUIDE.md) for full `--max-prefix-len-v4`/`--max-prefix-len-v6` documentation.
+
+## Scenario 11: IPv6 Prefix Length Clamping
+
+**Goal**: Truncate overly-specific IPv6 prefixes to a maximum length before aggregation.
+
+Create `ipv6-hosts.txt`:
+
+```
+2001:db8::1/128
+2001:db8::2/128
+2001:db8:0:1::1/128
+2001:db8:0:1::2/128
+```
+
+Run without clamping:
+
+```bash
+cidr-optimizer ipv6-hosts.txt
+```
+
+Output: 4 entries (no siblings to merge — scattered /128s).
+
+Now clamp to /64:
+
+```bash
+cidr-optimizer --max-prefix-len-v6 64 --stats ipv6-hosts.txt
+```
+
+Expected output:
+
+```
+2001:db8::/63
+```
+
+What happened: All /128 host routes were truncated to /64 before aggregation. The resulting 2001:db8::/64 and 2001:db8:0:1::/64 are siblings and merged losslessly into 2001:db8::/63. See [User Guide](USER_GUIDE.md) for full `--max-prefix-len-v4`/`--max-prefix-len-v6` documentation.
+
+## Scenario 12: Preferred Over-Coverage Zones
+
+**Goal**: Steer widening toward your own address space rather than unrelated ranges.
+
+Create `partner-ips.txt`:
+
+```
+10.0.0.0/24
+10.0.1.0/24
+10.0.4.0/24
+10.0.5.0/24
+192.168.0.0/24
+192.168.1.0/24
+```
+
+Create `our-space.txt` (address space you own and accept over-coverage into):
+
+```
+10.0.0.0/21  # our allocation
+```
+
+Run:
+
+```bash
+cidr-optimizer --ipv4-target 3 \
+  --preferred-over-coverage-cidrs our-space.txt \
+  --stats partner-ips.txt
+```
+
+Expected output (stdout):
+
+```
+10.0.0.0/23
+10.0.4.0/23
+192.168.0.0/23
+```
+
+Statistics (stderr):
+
+```
+IPv4: 6 input → 3 output (compression: 2.0x)
+IPv6: 0 input → 0 output (compression: 1.0x)
+```
+
+What happened: Each pair of adjacent /24s merged losslessly into /23s — no over-coverage was needed because the target of 3 was achievable through sibling merging alone. The preferred zones become relevant when the target forces widening beyond siblings.
+
+Now try with a tighter target to see preferred zones in action:
+
+```bash
+cidr-optimizer --ipv4-target 2 \
+  --preferred-over-coverage-cidrs our-space.txt \
+  --max-over-coverage -1 \
+  --stats partner-ips.txt
+```
+
+Expected output:
+
+```
+10.0.0.0/21
+192.168.0.0/23
+```
+
+Statistics show all over-coverage landed in preferred space:
+
+```
+IPv4: 6 input → 2 output (compression: 3.0x)
+IPv6: 0 input → 0 output (compression: 1.0x)
+IPv4 over-coverage: 66.67% (1024 IPs)
+  Preferred: 66.67% (1024 IPs)
+  Non-preferred: 0.00% (0 IPs)
+```
+
+What happened: The optimizer merged all four 10.x /24s into 10.0.0.0/21 — the 1024 extra IPs (10.0.2.0/24, 10.0.3.0/24, 10.0.6.0/24, 10.0.7.0/24) all fall within our preferred 10.0.0.0/21 allocation. Non-preferred over-coverage is zero because the 192.168.0.0/23 merge was lossless (two siblings).
+
+Add `--max-non-preferred-over-coverage` to cap non-preferred widening:
+
+```bash
+cidr-optimizer --ipv4-target 3 \
+  --preferred-over-coverage-cidrs our-space.txt \
+  --max-non-preferred-over-coverage 20 \
+  partner-ips.txt
+```
+
+This caps non-preferred over-coverage at 20% independently of the global cap. See [User Guide — Preferred Over-Coverage Zones](USER_GUIDE.md#preferred-over-coverage-zones) for full documentation.
 
 ## Next Steps
 
