@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.3.0] - 2026-05-17
+
+### Added
+
+- **Preferred over-coverage zones** — `--preferred-over-coverage-cidrs FILE` and `--max-non-preferred-over-coverage PCT` steer widening toward acceptable address space by discounting over-coverage that falls within preferred ranges
+- **Prefix length clamping** — `--max-prefix-len-v4` / `--max-prefix-len-v6` truncate overly-specific prefixes before aggregation, useful when downstream systems have prefix length restrictions
+
+### Fixed
+
+- **Test correctness** — fix ratio cap stress test using wrong denominator, fix MaxOverCoverage unit test that never exercised the lossy path, add `LC_ALL=C` to shell tests for locale independence
+
+### Documentation
+
+- Document prefix clamping and preferred over-coverage zones across all guides
+- Add module-level and inline code comments to library and CLI
+- Document parser and TargetSpec public APIs in Developer API guide
+
+### Chores
+
+- Extend test coverage for `--max-prefix-len-v4/v6` and preferred zone features
+
 ## [1.2.1] - 2026-05-16
 
 ### Changed
